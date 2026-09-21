@@ -68,6 +68,26 @@ public class RuleEngine {
         this.clock = clock;
     }
 
+    /**
+     * 判断规则条件是否绑定到指定设备：条件树中存在针对该设备（deviceId 为 null
+     * 表示作用于触发设备本身）的状态条件，或仅有时间窗口类条件（视为任意设备可触发）。
+     */
+    private boolean ruleTouchesDevice(Rule rule, String deviceId) {
+        return touches(rule.condition(), deviceId);
+    }
+
+    private boolean touches(com.github.h3yow.homeautomationenginejava.rule.Condition c,
+                            String deviceId) {
+        if (c instanceof com.github.h3yow.homeautomationenginejava.rule.StateCondition sc) {
+            return sc.deviceId() == null || sc.deviceId().equals(deviceId);
+        }
+        if (c instanceof com.github.h3yow.homeautomationenginejava.rule.CompositeCondition cc) {
+            return cc.children().stream().anyMatch(child -> touches(child, deviceId));
+        }
+        // 纯时间窗口等条件本身不选择设备：交由其他条件约束；单独存在时视为可触发
+        return true;
+    }
+
     public PropagationResult propagate(Device rootDevice, StateSnapshot rootSnapshot) {
         String eventId = "evt-" + UUID.randomUUID();
         RuleTrace trace = new RuleTrace(eventId);
@@ -107,12 +127,12 @@ public class RuleEngine {
                     if (matched.containsKey(rule)) {
                         continue; // 本层已被另一事件匹配
                     }
-                    // 一次传播去重：已在本传播任意层触发过的规则不再执行
-                    if (globallyFired.contains(rule.ruleId())) {
-                        trace.step("规则 " + rule.ruleId() + " 本次传播已触发过，去重跳过");
+                    // 只有条件绑定到当前事件设备的规则才可能被此事件触发；
+                    // 绑定其他设备的规则不参与本事件的环判定与评估
+                    if (!ruleTouchesDevice(rule, event.device().deviceId())) {
                         continue;
                     }
-                    // 环检测：规则已在当前触发路径上
+                    // 环检测优先于去重：规则已在当前触发路径上即为闭环，必须立即识别
                     if (event.path().contains(rule.ruleId())) {
                         List<String> cyclePath = new ArrayList<>(event.path());
                         cyclePath.add(rule.ruleId());
@@ -124,6 +144,11 @@ public class RuleEngine {
                         return new PropagationResult(eventId, List.copyOf(firedRules),
                                 List.copyOf(dispatched), Map.copyOf(suppressed),
                                 List.copyOf(cyclePath), trace);
+                    }
+                    // 一次传播去重：已在本传播任意层触发过且不在当前路径上的规则不再执行
+                    if (globallyFired.contains(rule.ruleId())) {
+                        trace.step("规则 " + rule.ruleId() + " 本次传播已触发过，去重跳过");
+                        continue;
                     }
                     boolean satisfied;
                     try {
