@@ -46,6 +46,8 @@ public class CommandService {
     private final ConcurrentMap<String, CommandResult> conclusions = new ConcurrentHashMap<>();
     /** 设备|幂等键 -> 首个命令 id：重试只返回同一结论，绝不二次执行。 */
     private final ConcurrentMap<String, String> idempotencyIndex = new ConcurrentHashMap<>();
+    /** 幂等键的细粒度锁：保证“去重判定 + 入队”对同键命令原子，消除并发重复执行。 */
+    private final ConcurrentMap<String, Object> idempotencyLocks = new ConcurrentHashMap<>();
 
     private final DeviceRegistry deviceRegistry;
     private final ModelRegistry modelRegistry;
@@ -88,25 +90,7 @@ public class CommandService {
     private SubmitOutcome doSubmit(CommandRequest request, String principalId) {
         Device device = deviceRegistry.get(request.deviceId());
 
-        String idemUnique = request.deviceId() + "|" + request.idempotencyKey();
-        String existingId = idempotencyIndex.putIfAbsent(idemUnique, request.commandId());
-        if (existingId != null) {
-            CommandResult existing = conclusions.get(existingId);
-            String detail = "幂等键 " + request.idempotencyKey() + " 与命令 "
-                    + existingId + " 相同，重复命令不二次执行";
-            log.info("[命令-去重] device={} incoming={} existing={} outcome={}",
-                    request.deviceId(), request.commandId(), existingId,
-                    existing == null ? "PENDING" : existing.outcome());
-            CommandResult duplicate = new CommandResult(request.commandId(),
-                    request.deviceId(),
-                    existing == null ? CommandOutcome.ACCEPTED : existing.outcome(),
-                    RejectReason.DUPLICATE_COMMAND, detail, null, existingId,
-                    existing == null ? Map.of() : existing.effectiveAttributes(),
-                    clock.nowMillis());
-            conclusions.put(request.commandId(), duplicate);
-            return new SubmitOutcome(duplicate, existing != null);
-        }
-
+        // 模型校验在幂等锁外先做（不涉及共享状态竞争）
         try {
             validateAgainstModel(device, request);
         } catch (CommandRejectedException ex) {
@@ -114,45 +98,71 @@ public class CommandService {
                     CommandOutcome.REJECTED, ex.reason, ex.getMessage(), null), true);
         }
 
-        StateSnapshot current = stateConvergence.snapshot(request.deviceId());
-        if (current != null && !current.online()) {
-            return new SubmitOutcome(terminal(request, device, principalId,
-                    CommandOutcome.FAILED, RejectReason.DEVICE_OFFLINE,
-                    "设备当前离线，命令不执行", null), true);
+        String idemUnique = request.deviceId() + "|" + request.idempotencyKey();
+        Object idemLock = idempotencyLocks.computeIfAbsent(idemUnique, k -> new Object());
+        synchronized (idemLock) {
+            String existingId = idempotencyIndex.get(idemUnique);
+            if (existingId != null) {
+                CommandResult existing = conclusions.get(existingId);
+                String detail = "幂等键 " + request.idempotencyKey() + " 与命令 "
+                        + existingId + " 相同，重复命令不二次执行";
+                log.info("[命令-去重] device={} incoming={} existing={} outcome={}",
+                        request.deviceId(), request.commandId(), existingId,
+                        existing == null ? "PENDING" : existing.outcome());
+                CommandResult duplicate = new CommandResult(request.commandId(),
+                        request.deviceId(),
+                        existing == null ? CommandOutcome.ACCEPTED : existing.outcome(),
+                        RejectReason.DUPLICATE_COMMAND, detail, null, existingId,
+                        existing == null ? Map.of() : existing.effectiveAttributes(),
+                        clock.nowMillis());
+                conclusions.put(request.commandId(), duplicate);
+                return new SubmitOutcome(duplicate, existing != null);
+            }
+
+            StateSnapshot current = stateConvergence.snapshot(request.deviceId());
+            if (current != null && !current.online()) {
+                return new SubmitOutcome(terminal(request, device, principalId,
+                        CommandOutcome.FAILED, RejectReason.DEVICE_OFFLINE,
+                        "设备当前离线，命令不执行", null), true);
+            }
+
+            CompletableFuture<CommandResult> future = new CompletableFuture<>();
+            pendings.put(request.commandId(), new Pending(request, principalId, future));
+            PerDeviceCommandQueue.EnqueueResult enqueue =
+                    queue.submit(request.deviceId(), request);
+
+            if (!enqueue.accepted()) {
+                pendings.remove(request.commandId());
+                return new SubmitOutcome(terminal(request, device, principalId,
+                        CommandOutcome.REJECTED, enqueue.rejectReason(),
+                        enqueue.detail(), null), true);
+            }
+
+            if (enqueue.mergedIntoCommandId() != null) {
+                CommandResult merged = new CommandResult(request.commandId(),
+                        request.deviceId(), CommandOutcome.ACCEPTED, RejectReason.MERGED,
+                        "已合并入在队命令 " + enqueue.mergedIntoCommandId(),
+                        null, enqueue.mergedIntoCommandId(), Map.of(), clock.nowMillis());
+                conclusions.put(request.commandId(), merged);
+                log.info("[命令-合并] incoming={} mergedInto={}",
+                        request.commandId(), enqueue.mergedIntoCommandId());
+                return new SubmitOutcome(merged, false);
+            }
+
+            // 入队成功后再登记幂等键，保证同键并发请求只有一个真正入队执行
+            idempotencyIndex.put(idemUnique, request.commandId());
+            CommandResult accepted = new CommandResult(request.commandId(),
+                    request.deviceId(), CommandOutcome.ACCEPTED, null,
+                    "命令已受理并进入设备串行队列", null, null, Map.of(), clock.nowMillis());
+            conclusions.put(request.commandId(), accepted);
+            log.info("[命令-受理] device={} command={} id={} source={}",
+                    request.deviceId(), request.command(), request.commandId(),
+                    request.sourceRuleId() == null ? "user:" + principalId
+                            : "rule:" + request.sourceRuleId());
+            return new SubmitOutcome(accepted, false);
         }
-
-        CompletableFuture<CommandResult> future = new CompletableFuture<>();
-        pendings.put(request.commandId(), new Pending(request, principalId, future));
-        PerDeviceCommandQueue.EnqueueResult enqueue = queue.submit(request.deviceId(), request);
-
-        if (!enqueue.accepted()) {
-            pendings.remove(request.commandId());
-            return new SubmitOutcome(terminal(request, device, principalId,
-                    CommandOutcome.REJECTED, enqueue.rejectReason(),
-                    enqueue.detail(), null), true);
-        }
-
-        if (enqueue.mergedIntoCommandId() != null) {
-            CommandResult merged = new CommandResult(request.commandId(),
-                    request.deviceId(), CommandOutcome.ACCEPTED, RejectReason.MERGED,
-                    "已合并入在队命令 " + enqueue.mergedIntoCommandId(),
-                    null, enqueue.mergedIntoCommandId(), Map.of(), clock.nowMillis());
-            conclusions.put(request.commandId(), merged);
-            log.info("[命令-合并] incoming={} mergedInto={}",
-                    request.commandId(), enqueue.mergedIntoCommandId());
-            return new SubmitOutcome(merged, false);
-        }
-
-        CommandResult accepted = new CommandResult(request.commandId(),
-                request.deviceId(), CommandOutcome.ACCEPTED, null,
-                "命令已受理并进入设备串行队列", null, null, Map.of(), clock.nowMillis());
-        conclusions.put(request.commandId(), accepted);
-        log.info("[命令-受理] device={} command={} id={} source={}",
-                request.deviceId(), request.command(), request.commandId(),
-                request.sourceRuleId() == null ? "user:" + principalId
-                        : "rule:" + request.sourceRuleId());
-        return new SubmitOutcome(accepted, false);
     }
+
 
     /** 校验命令是否符合设备模型；非法时抛出携带确定原因的异常。 */
     public Map<String, Object> validateAgainstModel(Device device, CommandRequest request) {
