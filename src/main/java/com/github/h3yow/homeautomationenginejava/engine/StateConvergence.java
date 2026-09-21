@@ -27,7 +27,8 @@ import java.util.function.BiConsumer;
  * - seq 单调收敛：携带 seq 且不大于已收敛序号的上报为过期乱序，不采纳、状态不回退；
  * - 设备未携带 seq 时由收敛器在设备锁内分配严格递增序号；
  * - online=false 的离线/失败上报只更新在线位，不覆盖任何能力属性，也不会记为成功；
- * - 仅当能力属性实际发生变化（或在线位翻转）时产生新快照并通知监听器，避免重复触发。
+ * - 仅当能力属性实际发生变化（或在线位翻转）时产生新快照；监听器通知在锁外触发，
+ *   与规则引擎的下发/等待形成确定的同步调用链，避免死锁。
  */
 @Service
 public class StateConvergence {
@@ -35,6 +36,10 @@ public class StateConvergence {
     private static final Logger log = LoggerFactory.getLogger(StateConvergence.class);
 
     private record Entry(StateSnapshot snapshot, long assignedSeq, long reportedSeq) {
+    }
+
+    /** 锁内计算结果，解锁后再通知监听器。 */
+    private record Accepted(ReportResult result, StateSnapshot changeView) {
     }
 
     private final ConcurrentMap<String, Entry> store = new ConcurrentHashMap<>();
@@ -66,6 +71,8 @@ public class StateConvergence {
                     RejectReason.UNSUPPORTED_MODEL_VERSION, ex.getMessage(), -1, Map.of());
         }
 
+        Accepted accepted;
+        ReportResult rejected;
         synchronized (lockFor(device.deviceId())) {
             Entry current = store.get(device.deviceId());
 
@@ -77,7 +84,7 @@ public class StateConvergence {
                         + " 未知能力属性: " + unknown;
                 log.warn("[上报-拒绝] device={} 原因=UNKNOWN_CAPABILITY {}",
                         device.deviceId(), detail);
-                return rejected(device, RejectReason.UNKNOWN_CAPABILITY, detail, current);
+                return reject(device, RejectReason.UNKNOWN_CAPABILITY, detail, current);
             }
 
             List<String> missing = model.requiredReportFields().stream()
@@ -87,7 +94,7 @@ public class StateConvergence {
                 String detail = "上报缺少必填字段: " + missing;
                 log.warn("[上报-拒绝] device={} 原因=MISSING_REQUIRED_FIELD {}",
                         device.deviceId(), detail);
-                return rejected(device, RejectReason.MISSING_REQUIRED_FIELD, detail, current);
+                return reject(device, RejectReason.MISSING_REQUIRED_FIELD, detail, current);
             }
 
             long assigned = (current == null ? 0 : current.assignedSeq()) + 1;
@@ -125,14 +132,19 @@ public class StateConvergence {
             log.info("[上报-采纳] device={} assignedSeq={} reportedSeq={} online={} 变化属性={}",
                     device.deviceId(), assigned, reportedSeq, online, changed);
 
-            if (!changed.isEmpty() || wasOnline != online) {
-                StateSnapshot changeView = new StateSnapshot(device.deviceId(), assigned, online,
-                        Map.copyOf(changed), clock.nowMillis());
-                notifyListeners(device, changeView);
-            }
-            return new ReportResult(device.deviceId(), true, null, null,
+            ReportResult result = new ReportResult(device.deviceId(), true, null, null,
                     assigned, finalAttrs);
+            StateSnapshot changeView = (!changed.isEmpty() || wasOnline != online)
+                    ? new StateSnapshot(device.deviceId(), assigned, online,
+                            Map.copyOf(changed), clock.nowMillis())
+                    : null;
+            accepted = new Accepted(result, changeView);
         }
+
+        if (accepted.changeView() != null) {
+            notifyListeners(device, accepted.changeView());
+        }
+        return accepted.result();
     }
 
     public StateSnapshot snapshot(String deviceId) {
@@ -141,8 +153,9 @@ public class StateConvergence {
     }
 
     /**
-     * 命令生效确认：在设备锁内把期望属性合并进当前状态并单调推进；
-     * 返回变化视图（变化为空时返回 null，调用方据此决定是否触发链式规则）。
+     * 命令生效确认：在设备锁内把期望属性合并进当前状态并单调推进。
+     * 通知同样在锁外由调用方（CommandService）按需触发规则链。
+     * 返回变化视图；无变化返回 null。
      */
     public StateSnapshot confirmEffective(String deviceId, Map<String, Object> expectedAttributes) {
         synchronized (lockFor(deviceId)) {
@@ -189,8 +202,8 @@ public class StateConvergence {
         return locks.computeIfAbsent(deviceId, k -> new Object());
     }
 
-    private ReportResult rejected(Device device, RejectReason reason, String detail,
-                                  Entry current) {
+    private ReportResult reject(Device device, RejectReason reason, String detail,
+                                Entry current) {
         Map<String, Object> latest = current == null
                 ? Map.of() : new HashMap<>(current.snapshot().attributes());
         long seq = current == null ? -1 : current.snapshot().seq();
