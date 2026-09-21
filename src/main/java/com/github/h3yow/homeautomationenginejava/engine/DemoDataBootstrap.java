@@ -79,6 +79,7 @@ public class DemoDataBootstrap implements CommandLineRunner {
                         "setBrightness", Set.of("value")),
                 Map.of("turnOn", "power", "turnOff", "power",
                         "setBrightness", "brightness"),
+                Map.of("turnOn", "on", "turnOff", "off"),
                 Set.of("power", "brightness"),
                 Set.of("power"),
                 Map.of("setBrightness", List.of(10, 20, 50, 100)));
@@ -89,6 +90,7 @@ public class DemoDataBootstrap implements CommandLineRunner {
                         "setBrightness", Set.of("value"), "setColor", Set.of("value")),
                 Map.of("turnOn", "power", "turnOff", "power",
                         "setBrightness", "brightness", "setColor", "color"),
+                Map.of("turnOn", "on", "turnOff", "off"),
                 Set.of("power", "brightness", "color"),
                 Set.of("power"),
                 Map.of("setBrightness", List.of(10, 20, 50, 100)));
@@ -97,6 +99,7 @@ public class DemoDataBootstrap implements CommandLineRunner {
                 Set.of("setTemperature"),
                 Map.of("setTemperature", Set.of("value")),
                 Map.of("setTemperature", "targetTemp"),
+                Map.of(),
                 Set.of("currentTemp", "targetTemp"),
                 Set.of("currentTemp"),
                 Map.of());
@@ -105,6 +108,7 @@ public class DemoDataBootstrap implements CommandLineRunner {
                 Set.of("open", "close"),
                 Map.of("open", Set.of(), "close", Set.of()),
                 Map.of("open", "position", "close", "position"),
+                Map.of("open", "open", "close", "closed"),
                 Set.of("position"),
                 Set.of("position"),
                 Map.of());
@@ -113,6 +117,7 @@ public class DemoDataBootstrap implements CommandLineRunner {
                 Set.of("lock", "unlock"),
                 Map.of("lock", Set.of(), "unlock", Set.of()),
                 Map.of("lock", "locked", "unlock", "locked"),
+                Map.of("lock", true, "unlock", false),
                 Set.of("locked"),
                 Set.of("locked"),
                 Map.of());

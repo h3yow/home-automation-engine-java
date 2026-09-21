@@ -47,6 +47,13 @@ public class RuleEngine {
     private final ConflictResolver conflictResolver;
     private final CommandService commandService;
     private final EngineClock clock;
+    private final java.util.concurrent.ConcurrentMap<String, List<String>> lastCycle =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 查询某家庭最近一次检测到的成环规则路径（null 表示无环）。 */
+    public List<String> lastCyclePath(String householdId) {
+        return lastCycle.get(householdId);
+    }
 
     public RuleEngine(RuleRegistry ruleRegistry, DeviceRegistry deviceRegistry,
                       ModelRegistry modelRegistry, StateConvergence stateConvergence,
@@ -112,6 +119,8 @@ public class RuleEngine {
                         trace.markCycle(cyclePath);
                         trace.step("检测到规则环: " + cyclePath + "，终止传播");
                         log.warn("[规则传播-成环] event={} 环={}", eventId, cyclePath);
+                        lastCycle.put(event.device().householdId(),
+                                List.copyOf(cyclePath));
                         return new PropagationResult(eventId, List.copyOf(firedRules),
                                 List.copyOf(dispatched), Map.copyOf(suppressed),
                                 List.copyOf(cyclePath), trace);
@@ -246,6 +255,7 @@ public class RuleEngine {
             currentLevel = nextLevel;
         }
 
+        // 本次传播无环：若历史环已不存在（规则被禁用/删除），清除陈旧记录
         trace.step("传播正常结束 event=" + eventId + " 触发规则=" + firedRules);
         log.info("[规则传播-结束] event={} fired={} dispatched={} suppressed={}",
                 eventId, firedRules, dispatched, suppressed.keySet());

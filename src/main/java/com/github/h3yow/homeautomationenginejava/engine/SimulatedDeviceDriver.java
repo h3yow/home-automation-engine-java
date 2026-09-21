@@ -92,13 +92,13 @@ public class SimulatedDeviceDriver {
 
         DeviceModel model = modelRegistry.modelFor(device);
         String targetAttr = model.commandTarget().get(request.command());
-        Map<String, Object> resulting;
-        if (targetAttr == null) {
-            resulting = Map.of();
-        } else {
-            Object value = request.params().get("value");
-            resulting = value == null ? Map.of() : Map.of(targetAttr, value);
+        Object value = request.params().get("value");
+        if (value == null) {
+            value = model.commandResult().get(request.command());
         }
+        Map<String, Object> resulting =
+                (targetAttr == null || value == null) ? Map.of()
+                        : Map.of(targetAttr, value);
         long seq = hardwareCounters.merge(device.deviceId(), 1L, Long::sum);
         DriverOutcome outcome = new DriverOutcome(true, null,
                 Map.copyOf(resulting), seq);

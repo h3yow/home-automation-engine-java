@@ -4,6 +4,7 @@ import com.github.h3yow.homeautomationenginejava.engine.AccessControl;
 import com.github.h3yow.homeautomationenginejava.engine.ConflictResolver;
 import com.github.h3yow.homeautomationenginejava.engine.DeviceRegistry;
 import com.github.h3yow.homeautomationenginejava.engine.ExecutionLog;
+import com.github.h3yow.homeautomationenginejava.engine.RuleEngine;
 import com.github.h3yow.homeautomationenginejava.model.Device;
 import com.github.h3yow.homeautomationenginejava.model.ExecutionRecord;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -28,13 +29,31 @@ public class LogController {
     private final ExecutionLog executionLog;
     private final DeviceRegistry deviceRegistry;
     private final ConflictResolver conflictResolver;
+    private final RuleEngine ruleEngine;
 
     public LogController(AccessControl accessControl, ExecutionLog executionLog,
-                         DeviceRegistry deviceRegistry, ConflictResolver conflictResolver) {
+                         DeviceRegistry deviceRegistry, ConflictResolver conflictResolver,
+                         RuleEngine ruleEngine) {
         this.accessControl = accessControl;
         this.executionLog = executionLog;
         this.deviceRegistry = deviceRegistry;
         this.conflictResolver = conflictResolver;
+        this.ruleEngine = ruleEngine;
+    }
+
+    @org.springframework.web.bind.annotation.GetMapping("/cycles/{householdId}")
+    public Map<String, Object> cycle(@RequestHeader(value = "X-Principal-Id",
+                                             required = false) String principalId,
+                                     @org.springframework.web.bind.annotation.PathVariable
+                                     String householdId) {
+        accessControl.requireHouseholdScope(principalId, householdId);
+        java.util.List<String> path = ruleEngine.lastCyclePath(householdId);
+        if (path == null) {
+            return Map.of("householdId", householdId, "cycleDetected", false);
+        }
+        return Map.of("householdId", householdId, "cycleDetected", true,
+                "cyclePath", path,
+                "explanation", "规则按以下顺序再次触发到起始规则而形成闭环，传播已在闭环处终止");
     }
 
     @GetMapping

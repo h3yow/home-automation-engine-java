@@ -10,6 +10,8 @@ import java.util.Set;
  * capabilities: 允许上报的能力属性名集合；集合外的属性一律拒绝（未知能力不静默忽略）
  * requiredReportFields: 状态上报必填字段
  * commandValueDomain: 命令参数 -> 允许的离散/范围取值（null 表示不校验离散值）
+ * commandResult: 无参命令（如 open/close/lock）生效后写入的常量属性值；
+ *   有参命令的值优先取参数 value
  */
 public record DeviceModel(
         String modelId,
@@ -17,6 +19,7 @@ public record DeviceModel(
         Set<String> supportedCommands,
         Map<String, Set<String>> commandParams,
         Map<String, String> commandTarget,
+        Map<String, Object> commandResult,
         Set<String> capabilities,
         Set<String> requiredReportFields,
         Map<String, Object> commandValueDomain
