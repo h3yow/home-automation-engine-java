@@ -97,9 +97,19 @@ public class ConflictResolver {
         return attr == null ? c.command() : attr;
     }
 
+    /**
+     * 两候选是否为“重复动作”：命令必须相同；无参命令（turnOn/turnOff/open/close…）
+     * 命令不同即为互斥；同命令再比较 value 参数。
+     */
     private boolean sameParams(CandidateAction a, CandidateAction b) {
+        if (!a.command().equals(b.command())) {
+            return false;
+        }
         Object va = a.params().get("value");
         Object vb = b.params().get("value");
+        if (va == null && vb == null) {
+            return true;
+        }
         if (va instanceof Number x && vb instanceof Number y) {
             return x.doubleValue() == y.doubleValue();
         }
