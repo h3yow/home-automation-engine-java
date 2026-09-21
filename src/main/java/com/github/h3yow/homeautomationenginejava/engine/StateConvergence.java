@@ -1,46 +1,206 @@
 package com.github.h3yow.homeautomationenginejava.engine;
 
 import com.github.h3yow.homeautomationenginejava.model.Device;
+import com.github.h3yow.homeautomationenginejava.model.DeviceModel;
 import com.github.h3yow.homeautomationenginejava.model.ReportResult;
+import com.github.h3yow.homeautomationenginejava.model.RejectReason;
 import com.github.h3yow.homeautomationenginejava.model.StateSnapshot;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiConsumer;
 
 /**
- * 状态收敛器：
- * 1) 校验上报（未知能力/缺字段/模型版本），不合法明确拒绝；
- * 2) 按 seq 单调收敛，乱序/重复上报不得让已生效状态无解释回退；
- * 3) 离线/失败上报只改 online，不覆盖属性；
- * 4) 合法状态变化后通知监听器（规则引擎）。
+ * 状态收敛器（线程安全）。
+ *
+ * 语义约定：
+ * - 上报必须携带模型声明的必填字段；出现未知能力属性一律拒绝（不静默忽略）；
+ * - seq 单调收敛：携带 seq 且不大于已收敛序号的上报为过期乱序，不采纳、状态不回退；
+ * - 设备未携带 seq 时由收敛器在设备锁内分配严格递增序号；
+ * - online=false 的离线/失败上报只更新在线位，不覆盖任何能力属性，也不会记为成功；
+ * - 仅当能力属性实际发生变化（或在线位翻转）时产生新快照并通知监听器，避免重复触发。
  */
 @Service
 public class StateConvergence {
 
+    private static final Logger log = LoggerFactory.getLogger(StateConvergence.class);
+
+    private record Entry(StateSnapshot snapshot, long assignedSeq, long reportedSeq) {
+    }
+
+    private final ConcurrentMap<String, Entry> store = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, Object> locks = new ConcurrentHashMap<>();
+    private final List<BiConsumer<Device, StateSnapshot>> listeners = new CopyOnWriteArrayList<>();
+    private final ModelRegistry modelRegistry;
+    private final EngineClock clock;
+
+    public StateConvergence(ModelRegistry modelRegistry, EngineClock clock) {
+        this.modelRegistry = modelRegistry;
+        this.clock = clock;
+    }
+
     public void addChangeListener(BiConsumer<Device, StateSnapshot> listener) {
-        // TODO 骨架
+        listeners.add(listener);
     }
 
     public ReportResult report(Device device, Long seq, boolean online,
                                Map<String, Object> attributes) {
-        // TODO 骨架
-        return null;
+        Objects.requireNonNull(device, "device");
+        Map<String, Object> attrs = attributes == null ? Map.of() : attributes;
+        DeviceModel model;
+        try {
+            model = modelRegistry.modelFor(device);
+        } catch (IllegalArgumentException ex) {
+            log.warn("[上报-拒绝] device={} 原因=UNSUPPORTED_MODEL_VERSION detail={}",
+                    device.deviceId(), ex.getMessage());
+            return new ReportResult(device.deviceId(), false,
+                    RejectReason.UNSUPPORTED_MODEL_VERSION, ex.getMessage(), -1, Map.of());
+        }
+
+        synchronized (lockFor(device.deviceId())) {
+            Entry current = store.get(device.deviceId());
+
+            List<String> unknown = attrs.keySet().stream()
+                    .filter(k -> !model.capabilities().contains(k))
+                    .sorted().toList();
+            if (!unknown.isEmpty()) {
+                String detail = "上报包含模型 " + model.modelId() + " v" + model.version()
+                        + " 未知能力属性: " + unknown;
+                log.warn("[上报-拒绝] device={} 原因=UNKNOWN_CAPABILITY {}",
+                        device.deviceId(), detail);
+                return rejected(device, RejectReason.UNKNOWN_CAPABILITY, detail, current);
+            }
+
+            List<String> missing = model.requiredReportFields().stream()
+                    .filter(f -> !attrs.containsKey(f))
+                    .sorted().toList();
+            if (!missing.isEmpty()) {
+                String detail = "上报缺少必填字段: " + missing;
+                log.warn("[上报-拒绝] device={} 原因=MISSING_REQUIRED_FIELD {}",
+                        device.deviceId(), detail);
+                return rejected(device, RejectReason.MISSING_REQUIRED_FIELD, detail, current);
+            }
+
+            long assigned = (current == null ? 0 : current.assignedSeq()) + 1;
+            long reportedSeq = seq == null ? assigned : seq;
+
+            if (seq != null && current != null && reportedSeq <= current.reportedSeq()) {
+                String detail = "上报序号 " + reportedSeq + " 不大于已收敛序号 "
+                        + current.reportedSeq() + "，判定为乱序/重复，状态不回退";
+                log.warn("[上报-过期] device={} 原因=OUTDATED_SEQUENCE {}",
+                        device.deviceId(), detail);
+                return new ReportResult(device.deviceId(), false, RejectReason.OUTDATED_SEQUENCE,
+                        detail, current.snapshot().seq(), current.snapshot().attributes());
+            }
+
+            boolean wasOnline = current == null || current.snapshot().online();
+            Map<String, Object> baseAttrs = current == null
+                    ? new LinkedHashMap<>()
+                    : new LinkedHashMap<>(current.snapshot().attributes());
+
+            Map<String, Object> changed = new LinkedHashMap<>();
+            if (online) {
+                for (Map.Entry<String, Object> e : attrs.entrySet()) {
+                    Object old = baseAttrs.get(e.getKey());
+                    if (!valueEquals(old, e.getValue())) {
+                        changed.put(e.getKey(), e.getValue());
+                    }
+                    baseAttrs.put(e.getKey(), e.getValue());
+                }
+            }
+            Map<String, Object> finalAttrs = Map.copyOf(baseAttrs);
+            StateSnapshot snapshot = new StateSnapshot(device.deviceId(), assigned, online,
+                    finalAttrs, clock.nowMillis());
+            store.put(device.deviceId(), new Entry(snapshot, assigned, reportedSeq));
+
+            log.info("[上报-采纳] device={} assignedSeq={} reportedSeq={} online={} 变化属性={}",
+                    device.deviceId(), assigned, reportedSeq, online, changed);
+
+            if (!changed.isEmpty() || wasOnline != online) {
+                StateSnapshot changeView = new StateSnapshot(device.deviceId(), assigned, online,
+                        Map.copyOf(changed), clock.nowMillis());
+                notifyListeners(device, changeView);
+            }
+            return new ReportResult(device.deviceId(), true, null, null,
+                    assigned, finalAttrs);
+        }
     }
 
     public StateSnapshot snapshot(String deviceId) {
-        // TODO 骨架
-        return null;
+        Entry e = store.get(deviceId);
+        return e == null ? null : e.snapshot();
     }
 
-    /** 命令生效确认：仅当状态尚未被更新的上报覆盖时，按期望值收敛并触发后续传播。 */
+    /**
+     * 命令生效确认：在设备锁内把期望属性合并进当前状态并单调推进；
+     * 返回变化视图（变化为空时返回 null，调用方据此决定是否触发链式规则）。
+     */
     public StateSnapshot confirmEffective(String deviceId, Map<String, Object> expectedAttributes) {
-        // TODO 骨架
-        return null;
+        synchronized (lockFor(deviceId)) {
+            Entry current = store.get(deviceId);
+            if (current == null) {
+                return null;
+            }
+            Map<String, Object> merged = new LinkedHashMap<>(current.snapshot().attributes());
+            Map<String, Object> changed = new LinkedHashMap<>();
+            for (Map.Entry<String, Object> e : expectedAttributes.entrySet()) {
+                Object old = merged.get(e.getKey());
+                if (!valueEquals(old, e.getValue())) {
+                    changed.put(e.getKey(), e.getValue());
+                }
+                merged.put(e.getKey(), e.getValue());
+            }
+            if (changed.isEmpty()) {
+                return null;
+            }
+            long assigned = current.assignedSeq() + 1;
+            StateSnapshot snapshot = new StateSnapshot(deviceId, assigned, true,
+                    Map.copyOf(merged), clock.nowMillis());
+            store.put(deviceId, new Entry(snapshot, assigned, assigned));
+            log.info("[生效确认] device={} seq={} 变化属性={}", deviceId, assigned, changed);
+            return new StateSnapshot(deviceId, assigned, true, Map.copyOf(changed),
+                    clock.nowMillis());
+        }
     }
 
     public long nextSeq(String deviceId) {
-        // TODO 骨架
-        return 0L;
+        synchronized (lockFor(deviceId)) {
+            Entry current = store.get(deviceId);
+            return (current == null ? 0 : current.assignedSeq()) + 1;
+        }
+    }
+
+    private void notifyListeners(Device device, StateSnapshot changeView) {
+        for (BiConsumer<Device, StateSnapshot> listener : listeners) {
+            listener.accept(device, changeView);
+        }
+    }
+
+    private Object lockFor(String deviceId) {
+        return locks.computeIfAbsent(deviceId, k -> new Object());
+    }
+
+    private ReportResult rejected(Device device, RejectReason reason, String detail,
+                                  Entry current) {
+        Map<String, Object> latest = current == null
+                ? Map.of() : new HashMap<>(current.snapshot().attributes());
+        long seq = current == null ? -1 : current.snapshot().seq();
+        return new ReportResult(device.deviceId(), false, reason, detail, seq, latest);
+    }
+
+    private static boolean valueEquals(Object a, Object b) {
+        if (a instanceof Number x && b instanceof Number y) {
+            return x.doubleValue() == y.doubleValue();
+        }
+        return Objects.equals(a, b);
     }
 }

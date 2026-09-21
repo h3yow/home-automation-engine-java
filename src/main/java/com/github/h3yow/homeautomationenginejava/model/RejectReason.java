@@ -17,5 +17,6 @@ public enum RejectReason {
     DUPLICATE_COMMAND,       // 相同幂等键的命令已有结论
     MERGED,                  // 被合并进在队命令
     EXECUTION_FAILED,        // 设备执行返回失败
+    OUTDATED_SEQUENCE,      // 乱序/重复上报：序号不大于已收敛序号，不回退状态
     NO_RESPONSE              // 设备无响应 -> 超时
 }
