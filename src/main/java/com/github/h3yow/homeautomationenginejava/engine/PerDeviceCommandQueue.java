@@ -178,6 +178,18 @@ public class PerDeviceCommandQueue {
         return lane == null ? 0 : lane.queue.size();
     }
 
+    /** 测试隔离：清空指定设备当前排队但尚未执行的命令。 */
+    public void clearPending(String deviceId) {
+        Lane lane = lanes.get(deviceId);
+        if (lane != null) {
+            synchronized (lane) {
+                lane.queue.clear();
+                lane.mergedInto.clear();
+                lane.notifyAll();
+            }
+        }
+    }
+
     public void shutdown() {
         // 守护线程随 JVM 退出，这里无需额外动作
     }

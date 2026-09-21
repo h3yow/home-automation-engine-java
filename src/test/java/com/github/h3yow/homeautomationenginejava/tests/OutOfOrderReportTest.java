@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @SpringBootTest
 @AutoConfigureMockMvc
-class OutOfOrderReportTest {
+class OutOfOrderReportTest extends EngineTestBase {
 
     private static final Logger log = LoggerFactory.getLogger(OutOfOrderReportTest.class);
 

@@ -48,6 +48,15 @@ public class SimulatedDeviceDriver {
         log.info("[故障注入] device={} mode={}", deviceId, mode);
     }
 
+    /** 测试隔离：清空驱动幂等缓存与硬件序号，保证重试统计干净。 */
+    public void clearIdempotency(String deviceId) {
+        var perDevice = idempotency.get(deviceId);
+        if (perDevice != null) {
+            perDevice.clear();
+        }
+        hardwareCounters.remove(deviceId);
+    }
+
     public FaultMode fault(String deviceId) {
         return faults.getOrDefault(deviceId, FaultMode.HEALTHY);
     }

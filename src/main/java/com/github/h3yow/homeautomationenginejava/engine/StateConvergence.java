@@ -162,8 +162,12 @@ public class StateConvergence {
     public StateSnapshot confirmEffective(String deviceId, Map<String, Object> expectedAttributes) {
         synchronized (lockFor(deviceId)) {
             Entry current = store.get(deviceId);
+            // 设备尚无快照（理论上注册即有基线快照；此处兜底）：以在线空状态初始化
             if (current == null) {
-                return null;
+                StateSnapshot bootstrap = new StateSnapshot(deviceId, 0, true,
+                        Map.of(), clock.nowMillis());
+                current = new Entry(bootstrap, 0, 0);
+                store.put(deviceId, current);
             }
             Map<String, Object> merged = new LinkedHashMap<>(current.snapshot().attributes());
             Map<String, Object> changed = new LinkedHashMap<>();
@@ -184,6 +188,13 @@ public class StateConvergence {
             log.info("[生效确认] device={} seq={} 变化属性={}", deviceId, assigned, changed);
             return new StateSnapshot(deviceId, assigned, true, Map.copyOf(changed),
                     clock.nowMillis());
+        }
+    }
+
+    /** 测试隔离：清空设备快照（下一次上报视为初始状态）。 */
+    public void resetDevice(String deviceId) {
+        synchronized (lockFor(deviceId)) {
+            store.remove(deviceId);
         }
     }
 

@@ -19,6 +19,11 @@ public class ExecutionLog {
 
     private final ConcurrentMap<String, HouseholdLog> logs = new ConcurrentHashMap<>();
 
+    /** 测试隔离：清空所有执行记录。 */
+    public synchronized void clearAll() {
+        logs.clear();
+    }
+
     public void append(ExecutionRecord record) {
         logs.computeIfAbsent(record.householdId(), k -> new HouseholdLog()).add(record);
     }

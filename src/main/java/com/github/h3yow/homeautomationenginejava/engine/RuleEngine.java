@@ -55,6 +55,11 @@ public class RuleEngine {
         return lastCycle.get(householdId);
     }
 
+    /** 测试隔离：清缓存的成环路径。 */
+    public void clearCycleHistory() {
+        lastCycle.clear();
+    }
+
     public RuleEngine(RuleRegistry ruleRegistry, DeviceRegistry deviceRegistry,
                       ModelRegistry modelRegistry, StateConvergence stateConvergence,
                       ConflictResolver conflictResolver, CommandService commandService,

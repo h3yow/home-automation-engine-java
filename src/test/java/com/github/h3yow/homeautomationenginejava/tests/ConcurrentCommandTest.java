@@ -31,7 +31,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @SpringBootTest
 @AutoConfigureMockMvc
-class ConcurrentCommandTest {
+class ConcurrentCommandTest extends EngineTestBase {
 
     private static final Logger log = LoggerFactory.getLogger(ConcurrentCommandTest.class);
 

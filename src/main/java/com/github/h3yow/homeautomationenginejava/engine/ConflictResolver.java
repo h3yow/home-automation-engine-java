@@ -82,6 +82,11 @@ public class ConflictResolver {
         return suppressions.get(ruleId);
     }
 
+    /** 测试隔离：清空最近一轮抑制记录。 */
+    public void clearSuppressions() {
+        suppressions.clear();
+    }
+
     /** 测试/内部辅助：最近一轮全部抑制原因。 */
     public Map<String, String> allSuppressions() {
         return Map.copyOf(suppressions);

@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @SpringBootTest
 @AutoConfigureMockMvc
-class ModelCompatibilityTest {
+class ModelCompatibilityTest extends EngineTestBase {
 
     private static final Logger log = LoggerFactory.getLogger(ModelCompatibilityTest.class);
 

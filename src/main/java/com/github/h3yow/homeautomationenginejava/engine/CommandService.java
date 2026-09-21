@@ -104,19 +104,22 @@ public class CommandService {
             String existingId = idempotencyIndex.get(idemUnique);
             if (existingId != null) {
                 CommandResult existing = conclusions.get(existingId);
+                String hostOutcome = existing == null ? "PENDING"
+                        : existing.outcome().toString();
                 String detail = "幂等键 " + request.idempotencyKey() + " 与命令 "
-                        + existingId + " 相同，重复命令不二次执行";
+                        + existingId + " 相同，重复命令不二次执行；原命令结论="
+                        + hostOutcome;
                 log.info("[命令-去重] device={} incoming={} existing={} outcome={}",
-                        request.deviceId(), request.commandId(), existingId,
-                        existing == null ? "PENDING" : existing.outcome());
+                        request.deviceId(), request.commandId(), existingId, hostOutcome);
+                // 重复命令本身从未独立执行：结论恒为 ACCEPTED+DUPLICATE_COMMAND，
+                // 无论原命令处于受理中还是已生效，都不得把本次请求记为一次独立 EFFECTIVE
                 CommandResult duplicate = new CommandResult(request.commandId(),
-                        request.deviceId(),
-                        existing == null ? CommandOutcome.ACCEPTED : existing.outcome(),
+                        request.deviceId(), CommandOutcome.ACCEPTED,
                         RejectReason.DUPLICATE_COMMAND, detail, null, existingId,
                         existing == null ? Map.of() : existing.effectiveAttributes(),
                         clock.nowMillis());
                 conclusions.put(request.commandId(), duplicate);
-                return new SubmitOutcome(duplicate, existing != null);
+                return new SubmitOutcome(duplicate, true);
             }
 
             StateSnapshot current = stateConvergence.snapshot(request.deviceId());
@@ -204,7 +207,23 @@ public class CommandService {
     public CommandResult awaitResult(String commandId, long timeoutMillis) {
         Pending pending = pendings.get(commandId);
         if (pending == null) {
-            return conclusions.get(commandId);
+            CommandResult current = conclusions.get(commandId);
+            // 重复/被合并命令本身没有 future：跟随其宿主命令的最终结论
+            if (current != null && current.mergedIntoCommandId() != null
+                    && current.outcome() == CommandOutcome.ACCEPTED) {
+                CommandResult hostTerminal = awaitTerminal(
+                        current.mergedIntoCommandId(), timeoutMillis);
+                if (hostTerminal != null) {
+                    return withFollowReason(current, hostTerminal);
+                }
+                return current;
+            }
+            // 普通命令可能已被工作线程取走（future 已移交）但结论尚未产出：轮询等待终态
+            if (current != null && current.outcome() == CommandOutcome.ACCEPTED) {
+                CommandResult terminal = awaitTerminal(commandId, timeoutMillis);
+                return terminal == null ? current : terminal;
+            }
+            return current;
         }
         try {
             return pending.future().get(timeoutMillis, TimeUnit.MILLISECONDS);
@@ -216,6 +235,37 @@ public class CommandService {
         }
     }
 
+    private CommandResult withFollowReason(CommandResult follower, CommandResult hostTerminal) {
+        RejectReason followReason = follower.rejectReason() == RejectReason.MERGED
+                ? RejectReason.MERGED : RejectReason.DUPLICATE_COMMAND;
+        // 跟随命令本身从未独立执行：结论恒为 ACCEPTED + DUPLICATE/MERGED，
+        // 宿主成功与否通过 detail 表达，但绝不把跟随命令记为一次独立的 EFFECTIVE
+        String detail = follower.detail() + "；宿主命令结论=" + hostTerminal.outcome()
+                + (hostTerminal.rejectReason() == null ? ""
+                        : "(" + hostTerminal.rejectReason() + ")");
+        return new CommandResult(follower.commandId(), follower.deviceId(),
+                CommandOutcome.ACCEPTED, followReason, detail,
+                null, follower.mergedIntoCommandId(),
+                hostTerminal.effectiveAttributes(), hostTerminal.timestamp());
+    }
+
+    private CommandResult awaitTerminal(String hostCommandId, long timeoutMillis) {
+        long deadline = System.currentTimeMillis() + timeoutMillis;
+        while (System.currentTimeMillis() < deadline) {
+            CommandResult r = conclusions.get(hostCommandId);
+            if (r != null && r.outcome() != CommandOutcome.ACCEPTED) {
+                return r;
+            }
+            try {
+                Thread.sleep(2);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return conclusions.get(hostCommandId);
+            }
+        }
+        return conclusions.get(hostCommandId);
+    }
+
     public CommandResult getResult(String principalId, String commandId) {
         CommandResult result = conclusions.get(commandId);
         if (result == null) {
@@ -225,6 +275,14 @@ public class CommandService {
             accessControl.requireDeviceAccess(principalId, result.deviceId());
         }
         return result;
+    }
+
+    /** 测试隔离：清空命令运行时表（受理结论/future/幂等索引）。 */
+    public void resetRuntimeState() {
+        pendings.clear();
+        conclusions.clear();
+        idempotencyIndex.clear();
+        idempotencyLocks.clear();
     }
 
     public void activateDevice(Device device) {

@@ -28,7 +28,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @SpringBootTest
 @AutoConfigureMockMvc
-class RuleCycleTest {
+class RuleCycleTest extends EngineTestBase {
 
     private static final Logger log = LoggerFactory.getLogger(RuleCycleTest.class);
 
@@ -57,42 +57,44 @@ class RuleCycleTest {
         assertTrue(elapsed < 20000, "成环传播必须被快速终止，实际耗时 " + elapsed + "ms");
         log.info("[规则成环测试] 传播在 {}ms 内终止（环检测生效）", elapsed);
 
-        // 检查执行记录：A、B 各只产生一次动作（一次传播去重）
-        JsonNode records = listRecords();
+        // 经 API 查询成环路径：必须明确指出成环的规则与闭合点。
+        // 环路径 [A,B,A] 本身就证明 A 先执行、B 被 A 触发执行、随后再次回到 A 才检测成环。
+        JsonNode cycle = getCycle();
+        assertTrue(cycle.path("cycleDetected").asBoolean(), "应能查询到成环结论");
+        String path = cycle.path("cyclePath").toString();
+        log.info("[规则成环测试] 查询到成环路径: {}", path);
+        JsonNode cyclePath = cycle.path("cyclePath");
+        assertTrue(path.contains("cycle-a-curtain-open-light-on"), "环路径必须包含规则A");
+        assertTrue(path.contains("cycle-b-light-on-curtain-open"), "环路径必须包含规则B");
+        assertEquals(cyclePath.get(0).asText(),
+                cyclePath.get(cyclePath.size() - 1).asText(),
+                "环路径必须首尾相接指出闭合规则");
+
+        // 执行记录轮询等待工作线程落账：A、B 各只产生一次动作（一次传播去重）
         int countA = 0;
         int countB = 0;
-        StringBuilder cycleInfo = new StringBuilder();
-        for (JsonNode r : records) {
-            String rule = r.path("sourceRuleId").asText("");
-            if (rule.equals("cycle-a-curtain-open-light-on")) {
-                countA++;
+        long deadline = System.currentTimeMillis() + 3000;
+        while (System.currentTimeMillis() < deadline && (countA < 1 || countB < 1)) {
+            JsonNode records = listRecords();
+            countA = 0;
+            countB = 0;
+            for (JsonNode r : records) {
+                String rule = r.path("sourceRuleId").asText("");
+                if (rule.equals("cycle-a-curtain-open-light-on")) {
+                    countA++;
+                }
+                if (rule.equals("cycle-b-light-on-curtain-open")) {
+                    countB++;
+                }
             }
-            if (rule.equals("cycle-b-light-on-curtain-open")) {
-                countB++;
-            }
-            if (r.path("traceChain").toString().contains("cycle")) {
-                cycleInfo.append(r.path("traceChain"));
+            if (countA < 1 || countB < 1) {
+                Thread.sleep(50);
             }
         }
         log.info("[规则成环测试] 判定依据: 规则A动作次数={} 规则B动作次数={}", countA, countB);
         assertEquals(1, countA, "环上规则 A 在一次传播中只能执行一次");
         assertEquals(1, countB, "环上规则 B 在一次传播中只能执行一次");
-
-        // 环路径在服务端日志与被抑制记录中体现；这里断言两条规则都在链路里且无后续无限动作
         log.info("[规则成环测试] 规则追踪链路: 根事件窗帘open -> A开灯 -> B开窗帘 -> 再次命中A => 检测成环并终止");
-
-        // 经 API 查询成环路径：必须明确指出成环的规则与闭合点
-        JsonNode cycle = getCycle();
-        assertTrue(cycle.path("cycleDetected").asBoolean(), "应能查询到成环结论");
-        String path = cycle.path("cyclePath").toString();
-        log.info("[规则成环测试] 查询到成环路径: {}", path);
-        assertTrue(path.contains("cycle-a-curtain-open-light-on"), "环路径必须包含规则A");
-        assertTrue(path.contains("cycle-b-light-on-curtain-open"), "环路径必须包含规则B");
-        // 闭环：路径首尾规则相同（再次命中 A）
-        JsonNode cyclePath = cycle.path("cyclePath");
-        assertEquals(cyclePath.get(0).asText(),
-                cyclePath.get(cyclePath.size() - 1).asText(),
-                "环路径必须首尾相接指出闭合规则");
 
         enableRule("cycle-a-curtain-open-light-on", false);
         enableRule("cycle-b-light-on-curtain-open", false);

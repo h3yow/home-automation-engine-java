@@ -29,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @SpringBootTest
 @AutoConfigureMockMvc
-class FailureRecoveryTest {
+class FailureRecoveryTest extends EngineTestBase {
 
     private static final Logger log = LoggerFactory.getLogger(FailureRecoveryTest.class);
 
@@ -107,6 +107,8 @@ class FailureRecoveryTest {
                 replay.path("outcome").asText(),
                 replay.path("rejectReason").asText(""),
                 replay.path("mergedIntoCommandId").asText(""));
+        assertEquals("ACCEPTED", replay.path("outcome").asText(),
+                "重复命令本身是被受理的去重响应，不是一次独立执行");
         assertEquals("DUPLICATE_COMMAND", replay.path("rejectReason").asText(),
                 "同幂等键重试必须被识别为重复，不产生第二次副作用");
 

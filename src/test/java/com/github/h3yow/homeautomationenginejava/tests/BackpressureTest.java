@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 @SpringBootTest
 @AutoConfigureMockMvc
-class BackpressureTest {
+class BackpressureTest extends EngineTestBase {
 
     private static final Logger log = LoggerFactory.getLogger(BackpressureTest.class);
 

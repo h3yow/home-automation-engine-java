@@ -39,6 +39,18 @@ public class RuleRegistry {
                 .toList();
     }
 
+    public java.util.Set<String> allRuleIds() {
+        return java.util.Set.copyOf(rules.keySet());
+    }
+
+    public void setEnabled(String ruleId, boolean enabled) {
+        Rule r = rules.get(ruleId);
+        if (r != null) {
+            rules.put(ruleId, new Rule(r.ruleId(), r.householdId(), r.name(), enabled,
+                    r.priority(), r.condition(), r.actions()));
+        }
+    }
+
     public List<Rule> allEnabled() {
         return rules.values().stream()
                 .filter(Rule::enabled)
