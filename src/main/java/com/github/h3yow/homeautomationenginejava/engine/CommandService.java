@@ -22,6 +22,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import org.springframework.beans.factory.ObjectProvider;
 
 /**
  * 统一命令入口（用户入口与规则内部入口共用同一套校验与执行语义）。
@@ -55,13 +56,13 @@ public class CommandService {
     private final ExecutionLog executionLog;
     private final EngineProperties properties;
     private final EngineClock clock;
-    private final RuleEngine ruleEngine;
+    private final ObjectProvider<RuleEngine> ruleEngineProvider;
 
     public CommandService(DeviceRegistry deviceRegistry, ModelRegistry modelRegistry,
                           AccessControl accessControl, PerDeviceCommandQueue queue,
                           SimulatedDeviceDriver driver, StateConvergence stateConvergence,
                           ExecutionLog executionLog, EngineProperties properties,
-                          EngineClock clock, RuleEngine ruleEngine) {
+                          EngineClock clock, ObjectProvider<RuleEngine> ruleEngineProvider) {
         this.deviceRegistry = deviceRegistry;
         this.modelRegistry = modelRegistry;
         this.accessControl = accessControl;
@@ -71,7 +72,7 @@ public class CommandService {
         this.executionLog = executionLog;
         this.properties = properties;
         this.clock = clock;
-        this.ruleEngine = ruleEngine;
+        this.ruleEngineProvider = ruleEngineProvider;
     }
 
     public SubmitOutcome submit(CommandRequest request, String principalId) {
@@ -276,7 +277,7 @@ public class CommandService {
 
     private void safePropagate(Device device, StateSnapshot change) {
         try {
-            ruleEngine.propagate(device, change);
+            ruleEngineProvider.getObject().propagate(device, change);
         } catch (RuntimeException ex) {
             log.error("[命令-联动异常] device={}", device.deviceId(), ex);
         }

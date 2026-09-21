@@ -87,7 +87,9 @@ public class StateConvergence {
                 return reject(device, RejectReason.UNKNOWN_CAPABILITY, detail, current);
             }
 
-            List<String> missing = model.requiredReportFields().stream()
+            // 必填字段：携带能力属性的业务上报必须带齐；空属性上报视为心跳/在线翻转
+            List<String> missing = attrs.isEmpty() ? List.of()
+                    : model.requiredReportFields().stream()
                     .filter(f -> !attrs.containsKey(f))
                     .sorted().toList();
             if (!missing.isEmpty()) {
