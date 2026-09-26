@@ -414,7 +414,8 @@ public class CommandService {
                 outcome, reason, detail, chain, clock.nowMillis()));
     }
 
-    private static final class CommandRejectedException extends RuntimeException {
+    /** 包内可见：试运行沙箱复用同一套模型校验并需要读取确定的拒绝原因。 */
+    static final class CommandRejectedException extends RuntimeException {
         final RejectReason reason;
 
         CommandRejectedException(RejectReason reason, String message) {

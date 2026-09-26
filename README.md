@@ -137,6 +137,8 @@ homeauto.engine.command-timeout-millis=1500
 | `GET  /api/records?householdId=&deviceId=` | 执行记录（含失败上下文、规则链路） |
 | `GET  /api/records/suppressions/{ruleId}` | 被抑制动作原因 |
 | `GET  /api/records/cycles/{householdId}` | 最近一次成环路径 |
+| `POST /api/sandbox/dry-runs` | 试运行/复盘推演（见第 7 节） |
+| `GET  /api/sandbox/dry-runs[/{id}]` | 查询试运行报告（按家庭隔离） |
 
 规则条件 JSON 示例：
 ```json
@@ -148,10 +150,93 @@ homeauto.engine.command-timeout-millis=1500
 
 ---
 
-## 7. 验证方法
+## 7. 试运行 / 复盘沙箱（Dry-Run Sandbox）
+
+在真正动设备之前，用 `POST /api/sandbox/dry-runs` 对一条新规则或一段历史片段做完整推演。
+请求体指定**家庭**、**用于条件判断的时间点** `evaluationTime`（时间窗口条件统一按该时刻评估），
+以及一组**设备状态变化片段**（可手工构造，也可以是整理过的历史片段，允许乱序、重复、离线、
+包含能力范围之外的内容，按给定顺序逐条收敛）：
+
+```json
+{
+  "householdId": "H1",
+  "evaluationTime": 1790395200000,
+  "fragments": [
+    {"deviceId":"thermo-h1", "seq":10, "online":true, "attributes":{"currentTemp":35}},
+    {"deviceId":"curtain-h1", "seq":11, "online":false, "attributes":{}}
+  ],
+  "limits": {"maxDepth": 16, "maxEvents": 256, "maxSteps": 500}
+}
+```
+
+返回结构化、可查询的报告（`DryRunReport`）：
+
+| 字段 | 含义 |
+|---|---|
+| `fragments[]` | 每个片段的收敛结论（accepted/rejectReason/detail/appliedSeq） |
+| `steps[]` | 每一步判定依据：条件评估结果、冲突裁决、动作结论、成环、截断原因 |
+| `firedRules[]` | 最终触发的规则（同一次状态变化同一规则不会重复出现） |
+| `suppressedActions` | 被抑制/拒绝的动作及确定原因（CONFLICT/DUPLICATE/SCOPE_DENIED 等） |
+| `actions[]` | 每个胜出动作的推演结论（EFFECTIVE/REJECTED/FAILED/TIMEOUT + reason） |
+| `cyclePath` | 真实成环时首尾相接的规则链；非成环为 null |
+| `expectedStates` | 推演后家庭内每台设备的预期在线位与能力属性 |
+| `terminationReason` | COMPLETED / MAX_DEPTH_EXCEEDED / MAX_EVENTS_EXCEEDED |
+| `stepsTruncated` | 仅返回条目达到上限（推演本身仍推完） |
+
+### 7.1 适用场景
+
+- **新规则上线前**：用假设片段验证它会与哪些现有规则联动、是否成环、是否抑制别的动作。
+- **历史复盘**：把历史上的状态变化（含乱序/重复/离线片段）重新喂入，解释当时“会发生什么”。
+- **容量规划**：观察链路层数与访问节点数，评估规则拓扑的传播规模。
+
+### 7.2 与真实执行的语义一致性
+
+沙箱不是另一套近似实现，而是复用/镜像真实组件的同一条语义路径：
+
+- 片段收敛逐行镜像 `StateConvergence`：未知能力拒绝、缺必填字段拒绝、`seq` 单调
+  （较旧/重复片段不采纳、**已推演生效的状态不会被旧值改回**）、离线只翻在线位不覆盖属性；
+- 规则评估、一次传播去重、层级推进、路径成环判定镜像 `RuleEngine`：条件不满足不触发，
+  **只有首尾相接的真实触发链才判成环并终止该次传播**；非成环但链路较长时继续推完后续影响；
+- 冲突裁决调用 `ConflictResolver.resolvePure`（与真实裁决相同的纯函数），
+  胜出结果只取决于 (priority 降序, ruleId 字典序)，与片段/线程处理顺序无关；
+- 动作校验复用 `CommandService.validateAgainstModel`（未知命令/缺参/非法值/未知能力）
+  与 `AccessControl.requireRuleActionScope`（跨家庭目标确定拒绝，不静默忽略）；
+- 设备不可用结论与真实一致：模拟世界在线位为离线或注入 OFFLINE -> `FAILED/DEVICE_OFFLINE`，
+  FAIL_ALWAYS -> `FAILED/EXECUTION_FAILED`，NO_RESPONSE -> `TIMEOUT`，绝不假装成功；
+- 判定时间在整场推演中固定为 `evaluationTime`；相同输入（含相同判定时间、相同规则/设备/
+  故障/基线指纹）产生相同 `dryRunId` 与相同报告，重复推演幂等回放。
+
+### 7.3 隔离范围
+
+- 推演在**方法局部的模拟世界**（`DryRunService.SimWorld`）中进行：不调用真实驱动、
+  不进入每设备命令队列、不修改 `StateConvergence`、不写 `ExecutionLog`、
+  不写真实成环记录（`RuleEngine.lastCycle`）；
+- 裁决走纯函数入口，不触碰 `ConflictResolver` 的共享抑制表；
+- 报告存入独立的有界存储 `DryRunReportStore`（按家庭隔离，访问同样鉴权），
+  与正式执行记录物理分离；
+- 沙箱无任何实例可变状态：多份试运行彼此独立，可与真实命令、真实上报并发执行，
+  结果互不影响（见并发隔离单测）。
+
+### 7.4 容量边界
+
+`limits` 可逐请求收紧（不能放宽到配置默认值之上，配置项见
+`homeauto.engine.dry-run-max-*`）：
+
+| 上限 | 到达时行为 |
+|---|---|
+| `maxDepth`（默认 16） | 终止推演，`terminationReason=MAX_DEPTH_EXCEEDED`，返回已得部分结果 |
+| `maxEvents`（默认 256） | 终止推演，`MAX_EVENTS_EXCEEDED`，返回已得部分结果 |
+| `maxSteps`（默认 500） | 只截断 `steps[]` 返回条目并置 `stepsTruncated=true`，推演继续推完 |
+
+成环终止是正常语义（`COMPLETED` + `cyclePath`），与容量截断可明确区分。
+报告存储本身按家庭有界（最近 100 份），不会无界占用内存。
+
+---
+
+## 8. 验证方法
 
 ```bash
-mvn test            # 全部 12 个测试
+mvn test            # 全部 18 个测试
 mvn spring-boot:run # 本地起服务，可用 curl 按上表操作
 ```
 
@@ -168,16 +253,18 @@ mvn spring-boot:run # 本地起服务，可用 curl 按上表操作
 | `BackpressureTest` | 有界 REJECT 不越界、MERGE 同类归一、恢复后只执行一次 |
 | `ModelCompatibilityTest` / `ModelRegistryTest` | 未知命令/能力/缺参/非法值/版本裁决 |
 | `TimeWindowConditionTest` | 时间窗口边界、跨午夜、组合条件、缺失属性确定语义 |
+| `DryRunSandboxTest` | 试运行/复盘：乱序重复片段收敛、真实成环、含时间条件的非成环长链路、与真实命令并发隔离与可重复、容量截断、离线/非法值/跨家庭/冲突语义一致 |
 
 集成测试通过 `TestIsolationSupport` 在每个用例前恢复“演示数据基线”
-（清队列/故障/规则/记录/快照并重建在线基线），整套件连续多轮运行结果一致。
+（清队列/故障/规则/记录/试运行报告/快照并重建在线基线），整套件连续多轮运行结果一致。
 
-## 8. 关键代码索引
+## 9. 关键代码索引
 
 - 状态收敛：`engine/StateConvergence.java`
 - 命令生命周期：`engine/CommandService.java`
 - 每设备串行队列/风暴策略：`engine/PerDeviceCommandQueue.java`
 - 模拟硬件/故障注入：`engine/SimulatedDeviceDriver.java`
 - 规则传播/去重/环检测：`engine/RuleEngine.java`
-- 冲突裁决：`engine/ConflictResolver.java`
+- 冲突裁决（含纯函数入口 resolvePure）：`engine/ConflictResolver.java`
 - 多住户鉴权：`engine/AccessControl.java`
+- 试运行/复盘沙箱：`engine/DryRunService.java`（+ `DryRunReport` / `DryRunReportStore` / `api/SandboxController`）

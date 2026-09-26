@@ -24,13 +24,15 @@ public class TestIsolationSupport {
     private final ConflictResolver conflictResolver;
     private final RuleEngine ruleEngine;
     private final CommandService commandService;
+    private final DryRunReportStore dryRunReportStore;
 
     public TestIsolationSupport(DeviceRegistry deviceRegistry, RuleRegistry ruleRegistry,
                                 StateConvergence stateConvergence,
                                 SimulatedDeviceDriver driver,
                                 PerDeviceCommandQueue queue, ExecutionLog executionLog,
                                 ConflictResolver conflictResolver, RuleEngine ruleEngine,
-                                CommandService commandService) {
+                                CommandService commandService,
+                                DryRunReportStore dryRunReportStore) {
         this.deviceRegistry = deviceRegistry;
         this.ruleRegistry = ruleRegistry;
         this.stateConvergence = stateConvergence;
@@ -40,6 +42,7 @@ public class TestIsolationSupport {
         this.conflictResolver = conflictResolver;
         this.ruleEngine = ruleEngine;
         this.commandService = commandService;
+        this.dryRunReportStore = dryRunReportStore;
     }
 
     public synchronized void resetToBaseline() {
@@ -83,6 +86,7 @@ public class TestIsolationSupport {
         conflictResolver.clearSuppressions();
         ruleEngine.clearCycleHistory();
         commandService.resetRuntimeState();
+        dryRunReportStore.clearAll();
         for (Device device : devices) {
             stateConvergence.resetDevice(device.deviceId());
             // 重建在线空属性基线快照（不带属性，仅建立 online=true，不触发任何规则）

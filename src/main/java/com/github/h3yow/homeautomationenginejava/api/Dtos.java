@@ -35,6 +35,18 @@ public final class Dtos {
     public record FaultBody(String mode) {
     }
 
+    public record DryRunRequestBody(String householdId, Long evaluationTime,
+                                    List<DryRunFragment> fragments,
+                                    DryRunLimits limits) {
+    }
+
+    public record DryRunFragment(String deviceId, Long seq, Boolean online,
+                                 Map<String, Object> attributes) {
+    }
+
+    public record DryRunLimits(Integer maxDepth, Integer maxEvents, Integer maxSteps) {
+    }
+
     public record ErrorBody(String error, String reason, String detail) {
     }
 }

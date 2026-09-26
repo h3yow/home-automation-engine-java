@@ -43,7 +43,24 @@ public class ConflictResolver {
     }
 
     public List<ResolvedAction> resolve(List<CandidateAction> candidates) {
+        List<ResolvedAction> results = resolvePure(candidates);
         suppressions.clear();
+        for (ResolvedAction ra : results) {
+            ra.suppressedWithReason().forEach((ruleId, sup) -> {
+                suppressions.put(ruleId, sup.reason());
+                log.warn("[冲突裁决-抑制] rule={} winner={} reason={}",
+                        ruleId, sup.winnerRuleId(), sup.reason());
+            });
+        }
+        return results;
+    }
+
+    /**
+     * 纯函数式裁决：与 {@link #resolve} 完全相同的分组与胜出逻辑，
+     * 但不读写任何共享状态（suppressions 记录）。试运行沙箱并发推演使用此入口，
+     * 保证多份推演与真实执行并发时互不污染抑制记录。
+     */
+    public List<ResolvedAction> resolvePure(List<CandidateAction> candidates) {
         Map<String, List<CandidateAction>> groups = new LinkedHashMap<>();
         for (CandidateAction c : candidates.stream().sorted(ORDER).toList()) {
             String key = c.householdId() + "|" + c.deviceId() + "|" + targetAttr(c);
@@ -69,9 +86,6 @@ public class ConflictResolver {
                 }
                 suppressed.put(c.ruleId(),
                         new ResolvedAction.Suppression(c.ruleId(), winner.ruleId(), reason));
-                suppressions.put(c.ruleId(), reason);
-                log.warn("[冲突裁决-抑制] rule={} winner={} reason={}",
-                        c.ruleId(), winner.ruleId(), reason);
             }
             results.add(new ResolvedAction(winner, Map.copyOf(suppressed)));
         }

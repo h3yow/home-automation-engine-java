@@ -34,6 +34,9 @@ public class GlobalExceptionHandler {
         } else if (message.startsWith("UNKNOWN_RULE")) {
             status = HttpStatus.NOT_FOUND;
             reason = "UNKNOWN_RULE";
+        } else if (message.startsWith("UNKNOWN_DRY_RUN")) {
+            status = HttpStatus.NOT_FOUND;
+            reason = "UNKNOWN_DRY_RUN";
         } else if (message.startsWith("UNSUPPORTED_MODEL_VERSION")) {
             status = HttpStatus.UNPROCESSABLE_ENTITY;
             reason = "UNSUPPORTED_MODEL_VERSION";
