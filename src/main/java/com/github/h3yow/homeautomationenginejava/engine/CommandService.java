@@ -95,7 +95,7 @@ public class CommandService {
             validateAgainstModel(device, request);
         } catch (CommandRejectedException ex) {
             return new SubmitOutcome(terminal(request, device, principalId,
-                    CommandOutcome.REJECTED, ex.reason, ex.getMessage(), null), true);
+                    CommandOutcome.REJECTED, ex.reason(), ex.getMessage(), null), true);
         }
 
         String idemUnique = request.deviceId() + "|" + request.idempotencyKey();
@@ -414,12 +414,20 @@ public class CommandService {
                 outcome, reason, detail, chain, clock.nowMillis()));
     }
 
-    private static final class CommandRejectedException extends RuntimeException {
-        final RejectReason reason;
+    /**
+     * 命令模型校验拒绝（携带确定原因）。public 以便试运行沙箱复用同一套
+     * 校验语义并读取机读原因，保证推演结论与真实执行一致。
+     */
+    public static final class CommandRejectedException extends RuntimeException {
+        private final RejectReason reason;
 
-        CommandRejectedException(RejectReason reason, String message) {
+        public CommandRejectedException(RejectReason reason, String message) {
             super(message);
             this.reason = reason;
+        }
+
+        public RejectReason reason() {
+            return reason;
         }
     }
 }

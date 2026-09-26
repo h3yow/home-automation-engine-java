@@ -42,8 +42,13 @@ public class ConflictResolver {
         this.deviceRegistry = deviceRegistry;
     }
 
+    /**
+     * 纯函数式裁决：不读写任何共享状态，相同候选输入恒定得到相同结果。
+     * 试运行沙箱与真实执行共用本方法，保证两边裁决语义一致且互不干扰。
+     * 真实执行在裁决后由调用方（RuleEngine）调用 {@link #recordSuppressions}
+     * 把抑制原因落入可查询的共享记录。
+     */
     public List<ResolvedAction> resolve(List<CandidateAction> candidates) {
-        suppressions.clear();
         Map<String, List<CandidateAction>> groups = new LinkedHashMap<>();
         for (CandidateAction c : candidates.stream().sorted(ORDER).toList()) {
             String key = c.householdId() + "|" + c.deviceId() + "|" + targetAttr(c);
@@ -69,13 +74,25 @@ public class ConflictResolver {
                 }
                 suppressed.put(c.ruleId(),
                         new ResolvedAction.Suppression(c.ruleId(), winner.ruleId(), reason));
-                suppressions.put(c.ruleId(), reason);
                 log.warn("[冲突裁决-抑制] rule={} winner={} reason={}",
                         c.ruleId(), winner.ruleId(), reason);
             }
             results.add(new ResolvedAction(winner, Map.copyOf(suppressed)));
         }
         return results;
+    }
+
+    /**
+     * 真实执行专用：把一轮裁决产生的抑制原因落入共享记录（供
+     * {@code GET /api/records/suppressions/{ruleId}} 查询）。
+     * 试运行沙箱不得调用本方法，保证推演不污染正式抑制记录。
+     */
+    public void recordSuppressions(List<ResolvedAction> resolved) {
+        suppressions.clear();
+        for (ResolvedAction ra : resolved) {
+            ra.suppressedWithReason().forEach((ruleId, sup) ->
+                    suppressions.put(ruleId, sup.reason()));
+        }
     }
 
     public String suppressionReason(String ruleId) {

@@ -15,6 +15,12 @@ public class EngineProperties {
     private BackpressurePolicy backpressurePolicy = BackpressurePolicy.REJECT;
     private long maxDelayMillis = 2000;
     private long commandTimeoutMillis = 1500;
+    /** 试运行推演最大链路层数（BFS 深度上限，防止无界传播）。 */
+    private int dryRunMaxDepth = 16;
+    /** 试运行推演最大访问节点数（事件 + 规则评估总步数上限）。 */
+    private int dryRunMaxVisitedNodes = 512;
+    /** 试运行报告最大返回条目数（判定步骤数上限，超出仅截断报告不终止推演）。 */
+    private int dryRunMaxReportEntries = 200;
 
     // TODO 骨架 getter/setter
     public int getPerDeviceQueueCapacity() { return perDeviceQueueCapacity; }
@@ -25,4 +31,10 @@ public class EngineProperties {
     public void setMaxDelayMillis(long v) { this.maxDelayMillis = v; }
     public long getCommandTimeoutMillis() { return commandTimeoutMillis; }
     public void setCommandTimeoutMillis(long v) { this.commandTimeoutMillis = v; }
+    public int getDryRunMaxDepth() { return dryRunMaxDepth; }
+    public void setDryRunMaxDepth(int v) { this.dryRunMaxDepth = v; }
+    public int getDryRunMaxVisitedNodes() { return dryRunMaxVisitedNodes; }
+    public void setDryRunMaxVisitedNodes(int v) { this.dryRunMaxVisitedNodes = v; }
+    public int getDryRunMaxReportEntries() { return dryRunMaxReportEntries; }
+    public void setDryRunMaxReportEntries(int v) { this.dryRunMaxReportEntries = v; }
 }

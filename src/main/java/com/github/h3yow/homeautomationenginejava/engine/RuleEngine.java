@@ -30,8 +30,9 @@ import java.util.UUID;
  * - 同一规则在一次传播中最多触发一次（fired 集合去重），同一状态变化不重复执行动作；
  * - 按 BFS 层级推进：本层全部匹配规则先做冲突裁决，胜出动作下发并等待结论，
  *   只有真正生效的动作产生下一层事件；
- * - 维护规则路径栈，候选规则已在当前路径上时判定成环：立即终止整条传播，
- *   trace 指出成环规则序列；
+ * - 维护规则路径栈，候选规则已在当前路径上且条件确实再次满足时判定成环
+ *   （首尾相接的真实触发链）：立即终止整条传播，trace 指出成环规则序列；
+ *   在径但条件不再满足的规则不会再次触发，不误判成环；
  * - 规则动作越界（跨家庭）被 AccessControl 拒绝，记录原因但不影响其他规则；
  * - 所有评估、裁决、下发步骤写入 {@link RuleTrace}，作为可解释追踪链路。
  */
@@ -137,7 +138,25 @@ public class RuleEngine {
                     if (!ruleTouchesDevice(rule, event.device().deviceId())) {
                         continue;
                     }
-                    // 环检测优先于去重：规则已在当前触发路径上即为闭环，必须立即识别
+                    boolean satisfied;
+                    try {
+                        satisfied = rule.condition().evaluate(ctx);
+                    } catch (RuntimeException ex) {
+                        trace.step("规则 " + rule.ruleId() + " 条件评估异常: " + ex.getMessage());
+                        log.warn("[规则评估-异常] rule={}", rule.ruleId(), ex);
+                        continue;
+                    }
+                    trace.step("评估规则 " + rule.ruleId() + " [" + rule.name()
+                            + "] priority=" + rule.priority() + " 触发设备="
+                            + event.device().deviceId() + " 条件["
+                            + rule.condition().describe() + "]=" + satisfied
+                            + (satisfied ? " => 命中" : " => 不满足，不触发"));
+                    if (!satisfied) {
+                        continue;
+                    }
+                    // 环检测优先于去重：条件确实再次满足且规则已在当前触发路径上，
+                    // 才构成首尾相接的真实触发链闭环，必须立即识别；
+                    // 条件不满足的在径规则不会再次触发，不得误判成环
                     if (event.path().contains(rule.ruleId())) {
                         List<String> cyclePath = new ArrayList<>(event.path());
                         cyclePath.add(rule.ruleId());
@@ -155,22 +174,7 @@ public class RuleEngine {
                         trace.step("规则 " + rule.ruleId() + " 本次传播已触发过，去重跳过");
                         continue;
                     }
-                    boolean satisfied;
-                    try {
-                        satisfied = rule.condition().evaluate(ctx);
-                    } catch (RuntimeException ex) {
-                        trace.step("规则 " + rule.ruleId() + " 条件评估异常: " + ex.getMessage());
-                        log.warn("[规则评估-异常] rule={}", rule.ruleId(), ex);
-                        continue;
-                    }
-                    trace.step("评估规则 " + rule.ruleId() + " [" + rule.name()
-                            + "] priority=" + rule.priority() + " 触发设备="
-                            + event.device().deviceId() + " 条件["
-                            + rule.condition().describe() + "]=" + satisfied
-                            + (satisfied ? " => 命中" : " => 不满足，不触发"));
-                    if (satisfied) {
-                        matched.put(rule, event);
-                    }
+                    matched.put(rule, event);
                 }
             }
 
@@ -190,8 +194,9 @@ public class RuleEngine {
                 }
             }
 
-            // 3) 冲突裁决（确定性）
+            // 3) 冲突裁决（确定性）；真实执行把抑制原因落共享记录供查询
             List<ResolvedAction> resolved = conflictResolver.resolve(candidates);
+            conflictResolver.recordSuppressions(resolved);
             for (ResolvedAction ra : resolved) {
                 ra.suppressedWithReason().forEach((ruleId, sup) -> {
                     suppressed.put(ruleId, sup.reason());
