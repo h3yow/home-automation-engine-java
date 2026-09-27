@@ -207,7 +207,8 @@ public class DryRunService {
 
     /**
      * 单次状态变化的传播推演，镜像 {@link RuleEngine#propagate} 的层级推进语义：
-     * 本层统一裁决 -> 胜出动作模拟生效 -> 生效事件进入下一层；成环即终止本次传播。
+     * 先评估条件 -> 条件成立的回指规则才判成环（条件已不成立的回指不算环）
+     * -> 本层统一裁决 -> 胜出动作模拟生效 -> 生效事件进入下一层；真实成环即终止本次传播。
      */
     private void propagate(SimWorld world, Device rootDevice, StateSnapshot rootChange,
                            Context ctx) {
@@ -256,23 +257,6 @@ public class DryRunService {
                     if (!ruleTouchesDevice(rule, event.device().deviceId())) {
                         continue;
                     }
-                    // 环检测优先于去重：规则已在当前触发路径上即为闭环
-                    if (event.path().contains(rule.ruleId())) {
-                        List<String> cyclePath = new ArrayList<>(event.path());
-                        cyclePath.add(rule.ruleId());
-                        if (ctx.cyclePath == null) {
-                            ctx.cyclePath = cyclePath;
-                        }
-                        ctx.step("CYCLE", "检测到规则环: " + cyclePath
-                                + "，终止本次传播（真实成环，首尾相接）");
-                        log.warn("[试运行-成环] 环={}", cyclePath);
-                        return;
-                    }
-                    if (globallyFired.contains(rule.ruleId())) {
-                        ctx.step("EVAL", "规则 " + rule.ruleId()
-                                + " 本次传播已触发过，去重跳过");
-                        continue;
-                    }
                     boolean satisfied;
                     try {
                         satisfied = rule.condition().evaluate(triggerCtx);
@@ -286,9 +270,29 @@ public class DryRunService {
                             + event.device().deviceId() + " 条件["
                             + rule.condition().describe() + "]=" + satisfied
                             + (satisfied ? " => 命中" : " => 不满足，不触发"));
-                    if (satisfied) {
-                        matched.put(rule, event);
+                    if (!satisfied) {
+                        // 条件已不再成立的回指规则不会被再次触发，不构成成环，链路继续推完
+                        continue;
                     }
+                    // 条件确实成立且规则已在当前触发路径上：首尾相接的真实闭环
+                    if (event.path().contains(rule.ruleId())) {
+                        List<String> cyclePath = new ArrayList<>(event.path());
+                        cyclePath.add(rule.ruleId());
+                        if (ctx.cyclePath == null) {
+                            ctx.cyclePath = cyclePath;
+                        }
+                        ctx.step("CYCLE", "条件成立且规则回指当前路径: " + cyclePath
+                                + "，判定真实成环并终止本次传播（首尾相接）");
+                        log.warn("[试运行-成环] 环={}", cyclePath);
+                        return;
+                    }
+                    // 已在本传播其他分支/层级触发过：去重跳过，不算成环
+                    if (globallyFired.contains(rule.ruleId())) {
+                        ctx.step("EVAL", "规则 " + rule.ruleId()
+                                + " 本次传播已触发过，去重跳过");
+                        continue;
+                    }
+                    matched.put(rule, event);
                 }
             }
 

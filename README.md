@@ -85,12 +85,21 @@ homeauto.engine.command-timeout-millis=1500
 2. **一次传播去重**：同一规则在一次事件传播中最多触发一次（全局 fired 集合）。
 3. **层内统一冲突裁决**后再下发；动作经每设备串行队列执行，只有**真正生效**的动作
    才产生下一层事件。
-4. **成环检测**：维护规则触发路径，候选规则已在当前路径上即判定闭环，
-   立即终止整条传播并记录成环规则（首尾相接），可经
+4. **成环检测以“条件确实成立”为前提**：每条传播路径维护规则路径栈。对候选规则
+   **先评估条件**，只有条件在当前世界中确实成立、且该规则已位于当前路径上
+   （首尾相接、会被再次真实触发、否则将无限相互触发）时才判定闭环，立即终止整条
+   传播并记录成环规则（首尾相接，如 `[A,B,A]`），可经
    `GET /api/records/cycles/{householdId}` 查询。
-5. 规则动作跨家庭时由 `AccessControl` 拒绝（`ACTION_TARGET_OUT_OF_SCOPE`），
+   **回指同一设备但条件已不再成立的规则不算成环**：例如“窗帘开→开灯”“灯亮→关窗帘”
+   “窗帘关→上锁”链，窗帘被关上后重新评估第一条规则时 `position=open` 已不成立，
+   不构成闭环，上锁等后续影响继续逐层推完。环检测优先于一次传播去重。
+5. **容量截断与成环可区分**：单次传播受链路层数（`homeauto.engine.propagation-max-depth`，
+   默认 16）与访问事件节点数（`propagation-max-events`，默认 256）保护；到达上限时按
+   `MAX_DEPTH_EXCEEDED` / `MAX_EVENTS_EXCEEDED` 截断终止并保留已得到的部分结果
+   （已触发规则、已下发命令均有效），**不会把非成环长链或容量截断误报为成环**。
+6. 规则动作跨家庭时由 `AccessControl` 拒绝（`ACTION_TARGET_OUT_OF_SCOPE`），
    记录原因但不影响其他规则——**系统内部自动化同样不得越界**。
-6. 每步评估、裁决依据、下发与终止原因写入 `RuleTrace`（日志可见完整追踪链路）。
+7. 每步评估、裁决依据、下发与终止原因写入 `RuleTrace`（日志可见完整追踪链路）。
 
 ---
 
@@ -178,9 +187,9 @@ homeauto.engine.command-timeout-millis=1500
 | `firedRules[]` | 最终触发的规则（同一次状态变化同一规则不会重复出现） |
 | `suppressedActions` | 被抑制/拒绝的动作及确定原因（CONFLICT/DUPLICATE/SCOPE_DENIED 等） |
 | `actions[]` | 每个胜出动作的推演结论（EFFECTIVE/REJECTED/FAILED/TIMEOUT + reason） |
-| `cyclePath` | 真实成环时首尾相接的规则链；非成环为 null |
+| `cyclePath` | 真实成环时首尾相接的规则链（首个与末个 ruleId 相同）；非成环为 null |
 | `expectedStates` | 推演后家庭内每台设备的预期在线位与能力属性 |
-| `terminationReason` | COMPLETED / MAX_DEPTH_EXCEEDED / MAX_EVENTS_EXCEEDED |
+| `terminationReason` | COMPLETED（成环也属正常语义，见 `cyclePath`）/ MAX_DEPTH_EXCEEDED / MAX_EVENTS_EXCEEDED |
 | `stepsTruncated` | 仅返回条目达到上限（推演本身仍推完） |
 
 ### 7.1 适用场景
@@ -195,8 +204,14 @@ homeauto.engine.command-timeout-millis=1500
 
 - 片段收敛逐行镜像 `StateConvergence`：未知能力拒绝、缺必填字段拒绝、`seq` 单调
   （较旧/重复片段不采纳、**已推演生效的状态不会被旧值改回**）、离线只翻在线位不覆盖属性；
-- 规则评估、一次传播去重、层级推进、路径成环判定镜像 `RuleEngine`：条件不满足不触发，
-  **只有首尾相接的真实触发链才判成环并终止该次传播**；非成环但链路较长时继续推完后续影响；
+- 规则评估、一次传播去重、层级推进、路径成环判定镜像 `RuleEngine`：条件不满足不触发；
+  **成环判定以条件确实成立为前提——先评估条件，只有条件成立且规则回指当前触发路径
+  （首尾相接、会被再次真实触发）才判成环并终止该次传播**；回指同一设备但条件已不再
+  成立的规则不算成环（如“窗帘开→开灯→灯亮关窗帘→窗帘关上锁”，关窗帘后第一条规则的
+  `position=open` 已不成立，链路继续把上锁推完），非成环长链不会被提前终止；
+- **同一份输入在试运行与真实执行下结论一致**：该触发的规则集合与顺序一致（同一规则在
+  同一次状态变化中只触发一次）、动作结论一致、设备最终预期状态一致；区别仅是试运行不
+  真正下发、不写正式记录（见 `BackreferenceNonCycleChainTest` 的沙箱/真实双路对照）；
 - 冲突裁决调用 `ConflictResolver.resolvePure`（与真实裁决相同的纯函数），
   胜出结果只取决于 (priority 降序, ruleId 字典序)，与片段/线程处理顺序无关；
 - 动作校验复用 `CommandService.validateAgainstModel`（未知命令/缺参/非法值/未知能力）
@@ -236,7 +251,7 @@ homeauto.engine.command-timeout-millis=1500
 ## 8. 验证方法
 
 ```bash
-mvn test            # 全部 18 个测试
+mvn test            # 全部 22 个测试
 mvn spring-boot:run # 本地起服务，可用 curl 按上表操作
 ```
 
@@ -246,7 +261,8 @@ mvn spring-boot:run # 本地起服务，可用 curl 按上表操作
 |---|---|
 | `ConcurrentCommandTest` | 8 并发命令（含 3 个共享幂等键）：串行生效、去重数量确定、无半更新 |
 | `OutOfOrderReportTest` | 乱序/重复 seq 不回退、未知能力拒绝、离线上报不覆盖属性 |
-| `RuleCycleTest` | A⇄B 成环：快速终止、环路径 [A,B,A] 可查询、各规则只执行一次 |
+| `RuleCycleTest` | A⇄B 真环：快速终止、环路径 [A,B,A] 可查询、各规则只执行一次 |
+| `BackreferenceNonCycleChainTest` | 回指同一设备但条件不再成立的非成环长链（窗帘开→开灯→关窗帘→上锁）：沙箱与真实执行双路对照，后续规则完整触发、无成环结论、最终状态正确、相同输入报告幂等；真环 [A,B,A] 仍被识别终止；真实引擎容量截断与成环可区分且保留部分结果 |
 | `ConflictResolutionTest` | 高/低优先级冲突 + 重复动作：胜者确定、抑制原因可查询、turnOff 不执行 |
 | `AccessControlTest` | 6 类越权原因区分、正当跨家庭访问、内部动作不越界 |
 | `FailureRecoveryTest` | 离线/执行失败/超时分类、诊断上下文、同键重试无重复副作用 |

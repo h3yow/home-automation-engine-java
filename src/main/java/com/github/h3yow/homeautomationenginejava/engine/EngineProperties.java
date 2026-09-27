@@ -15,6 +15,10 @@ public class EngineProperties {
     private BackpressurePolicy backpressurePolicy = BackpressurePolicy.REJECT;
     private long maxDelayMillis = 2000;
     private long commandTimeoutMillis = 1500;
+    /** 规则传播：单次传播最大链路层数（超出按容量截断终止，区别于成环）。 */
+    private int propagationMaxDepth = 16;
+    /** 规则传播：单次传播可访问的事件节点数上限（超出按容量截断终止）。 */
+    private int propagationMaxEvents = 256;
     /** 试运行：单次传播最大链路层数（超出即截断）。 */
     private int dryRunMaxDepth = 16;
     /** 试运行：整场推演可访问的事件节点数上限（超出即截断）。 */
@@ -30,6 +34,10 @@ public class EngineProperties {
     public void setMaxDelayMillis(long v) { this.maxDelayMillis = v; }
     public long getCommandTimeoutMillis() { return commandTimeoutMillis; }
     public void setCommandTimeoutMillis(long v) { this.commandTimeoutMillis = v; }
+    public int getPropagationMaxDepth() { return propagationMaxDepth; }
+    public void setPropagationMaxDepth(int v) { this.propagationMaxDepth = v; }
+    public int getPropagationMaxEvents() { return propagationMaxEvents; }
+    public void setPropagationMaxEvents(int v) { this.propagationMaxEvents = v; }
     public int getDryRunMaxDepth() { return dryRunMaxDepth; }
     public void setDryRunMaxDepth(int v) { this.dryRunMaxDepth = v; }
     public int getDryRunMaxEvents() { return dryRunMaxEvents; }

@@ -30,8 +30,13 @@ import java.util.UUID;
  * - 同一规则在一次传播中最多触发一次（fired 集合去重），同一状态变化不重复执行动作；
  * - 按 BFS 层级推进：本层全部匹配规则先做冲突裁决，胜出动作下发并等待结论，
  *   只有真正生效的动作产生下一层事件；
- * - 维护规则路径栈，候选规则已在当前路径上时判定成环：立即终止整条传播，
- *   trace 指出成环规则序列；
+ * - 成环判定以“条件在当前世界中确实成立”为前提：先评估条件，只有条件成立、
+ *   规则已位于当前触发路径上（首尾相接、会被再次真实触发）才判定成环并立即终止；
+ *   条件已不再成立的回指规则不算成环，链路继续把后续影响推完；
+ * - 环检测优先于全局去重：条件成立的路径回指规则先闭合判环；
+ *   已在其他分支触发过但不在当前路径上的规则按去重跳过；
+ * - 链路层数 / 访问事件节点数到达容量上限时按“截断”终止并保留已得到的部分结果，
+ *   截断原因与成环明确可区分，非成环长链不会被误报成环；
  * - 规则动作越界（跨家庭）被 AccessControl 拒绝，记录原因但不影响其他规则；
  * - 所有评估、裁决、下发步骤写入 {@link RuleTrace}，作为可解释追踪链路。
  */
@@ -47,6 +52,7 @@ public class RuleEngine {
     private final ConflictResolver conflictResolver;
     private final CommandService commandService;
     private final EngineClock clock;
+    private final EngineProperties properties;
     private final java.util.concurrent.ConcurrentMap<String, List<String>> lastCycle =
             new java.util.concurrent.ConcurrentHashMap<>();
 
@@ -63,7 +69,7 @@ public class RuleEngine {
     public RuleEngine(RuleRegistry ruleRegistry, DeviceRegistry deviceRegistry,
                       ModelRegistry modelRegistry, StateConvergence stateConvergence,
                       ConflictResolver conflictResolver, CommandService commandService,
-                      EngineClock clock) {
+                      EngineClock clock, EngineProperties properties) {
         this.ruleRegistry = ruleRegistry;
         this.deviceRegistry = deviceRegistry;
         this.modelRegistry = modelRegistry;
@@ -71,6 +77,7 @@ public class RuleEngine {
         this.conflictResolver = conflictResolver;
         this.commandService = commandService;
         this.clock = clock;
+        this.properties = properties;
     }
 
     /**
@@ -112,13 +119,36 @@ public class RuleEngine {
                 eventId, rootDevice.deviceId(), rootSnapshot.attributes());
 
         int depth = 0;
+        int eventsProcessed = 0;
+        PropagationResult.TerminationReason terminationReason =
+                PropagationResult.TerminationReason.COMPLETED;
         while (!currentLevel.isEmpty()) {
             depth++;
+            if (depth > properties.getPropagationMaxDepth()) {
+                terminationReason = PropagationResult.TerminationReason.MAX_DEPTH_EXCEEDED;
+                trace.step("触发链层数超过上限 " + properties.getPropagationMaxDepth()
+                        + "，按容量截断终止（非成环），保留已得到的部分结果 fired="
+                        + firedRules);
+                log.warn("[规则传播-截断] event={} 原因=MAX_DEPTH_EXCEEDED depth={}",
+                        eventId, depth);
+                break;
+            }
             List<Event> nextLevel = new ArrayList<>();
 
             // 1) 收集本层所有匹配规则（候选），保证跨事件的冲突也能统一裁决
             Map<Rule, Event> matched = new LinkedHashMap<>();
             for (Event event : currentLevel) {
+                if (eventsProcessed >= properties.getPropagationMaxEvents()) {
+                    terminationReason = PropagationResult.TerminationReason.MAX_EVENTS_EXCEEDED;
+                    trace.step("访问事件节点数达到上限 "
+                            + properties.getPropagationMaxEvents()
+                            + "，按容量截断终止（非成环），保留已得到的部分结果 fired="
+                            + firedRules);
+                    log.warn("[规则传播-截断] event={} 原因=MAX_EVENTS_EXCEEDED events={}",
+                            eventId, eventsProcessed);
+                    break;
+                }
+                eventsProcessed++;
                 StateSnapshot full = stateConvergence.snapshot(event.device().deviceId());
                 StateSnapshot base = full == null ? event.snapshot() : full;
                 TriggerContext ctx = new TriggerContext(
@@ -137,24 +167,6 @@ public class RuleEngine {
                     if (!ruleTouchesDevice(rule, event.device().deviceId())) {
                         continue;
                     }
-                    // 环检测优先于去重：规则已在当前触发路径上即为闭环，必须立即识别
-                    if (event.path().contains(rule.ruleId())) {
-                        List<String> cyclePath = new ArrayList<>(event.path());
-                        cyclePath.add(rule.ruleId());
-                        trace.markCycle(cyclePath);
-                        trace.step("检测到规则环: " + cyclePath + "，终止传播");
-                        log.warn("[规则传播-成环] event={} 环={}", eventId, cyclePath);
-                        lastCycle.put(event.device().householdId(),
-                                List.copyOf(cyclePath));
-                        return new PropagationResult(eventId, List.copyOf(firedRules),
-                                List.copyOf(dispatched), Map.copyOf(suppressed),
-                                List.copyOf(cyclePath), trace);
-                    }
-                    // 一次传播去重：已在本传播任意层触发过且不在当前路径上的规则不再执行
-                    if (globallyFired.contains(rule.ruleId())) {
-                        trace.step("规则 " + rule.ruleId() + " 本次传播已触发过，去重跳过");
-                        continue;
-                    }
                     boolean satisfied;
                     try {
                         satisfied = rule.condition().evaluate(ctx);
@@ -168,10 +180,37 @@ public class RuleEngine {
                             + event.device().deviceId() + " 条件["
                             + rule.condition().describe() + "]=" + satisfied
                             + (satisfied ? " => 命中" : " => 不满足，不触发"));
-                    if (satisfied) {
-                        matched.put(rule, event);
+                    if (!satisfied) {
+                        // 条件不再成立的回指规则不会被再次触发，不构成成环，链路继续
+                        continue;
                     }
+                    // 条件确实成立且规则已在当前触发路径上：首尾相接、会无限相互触发，
+                    // 才判定真实成环，立即终止整条传播
+                    if (event.path().contains(rule.ruleId())) {
+                        List<String> cyclePath = new ArrayList<>(event.path());
+                        cyclePath.add(rule.ruleId());
+                        trace.markCycle(cyclePath);
+                        trace.step("条件成立且规则回指当前路径: " + cyclePath
+                                + "，判定真实成环并终止传播");
+                        log.warn("[规则传播-成环] event={} 环={}", eventId, cyclePath);
+                        lastCycle.put(event.device().householdId(),
+                                List.copyOf(cyclePath));
+                        return new PropagationResult(eventId, List.copyOf(firedRules),
+                                List.copyOf(dispatched), Map.copyOf(suppressed),
+                                List.copyOf(cyclePath),
+                                PropagationResult.TerminationReason.CYCLE_DETECTED, trace);
+                    }
+                    // 一次传播去重：已在本传播其他分支/层级触发过的规则不再执行
+                    if (globallyFired.contains(rule.ruleId())) {
+                        trace.step("规则 " + rule.ruleId() + " 本次传播已触发过，去重跳过");
+                        continue;
+                    }
+                    matched.put(rule, event);
                 }
+            }
+
+            if (terminationReason != PropagationResult.TerminationReason.COMPLETED) {
+                break; // 容量截断：保留部分结果退出
             }
 
             if (matched.isEmpty()) {
@@ -285,11 +324,13 @@ public class RuleEngine {
             currentLevel = nextLevel;
         }
 
-        // 本次传播无环：若历史环已不存在（规则被禁用/删除），清除陈旧记录
-        trace.step("传播正常结束 event=" + eventId + " 触发规则=" + firedRules);
-        log.info("[规则传播-结束] event={} fired={} dispatched={} suppressed={}",
-                eventId, firedRules, dispatched, suppressed.keySet());
+        // 传播结束（正常收敛或容量截断）：若历史环已不存在（规则被禁用/删除），清除陈旧记录
+        trace.step("传播结束 event=" + eventId + " 终止原因=" + terminationReason
+                + " 触发规则=" + firedRules);
+        log.info("[规则传播-结束] event={} reason={} fired={} dispatched={} suppressed={}",
+                eventId, terminationReason, firedRules, dispatched, suppressed.keySet());
         return new PropagationResult(eventId, List.copyOf(firedRules),
-                List.copyOf(dispatched), Map.copyOf(suppressed), null, trace);
+                List.copyOf(dispatched), Map.copyOf(suppressed), null,
+                terminationReason, trace);
     }
 }
