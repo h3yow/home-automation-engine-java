@@ -30,8 +30,9 @@ import java.util.UUID;
  * - 同一规则在一次传播中最多触发一次（fired 集合去重），同一状态变化不重复执行动作；
  * - 按 BFS 层级推进：本层全部匹配规则先做冲突裁决，胜出动作下发并等待结论，
  *   只有真正生效的动作产生下一层事件；
- * - 维护规则路径栈，候选规则已在当前路径上时判定成环：立即终止整条传播，
- *   trace 指出成环规则序列；
+ * - 维护规则路径栈：只有“条件在当前状态下确实成立、会真的再次触发”的
+ *   回指规则才构成成环（先评估条件，条件已不再成立的回指规则不算环）；
+ *   确认真实成环时立即终止整条传播，trace 指出首尾相接的成环规则序列；
  * - 规则动作越界（跨家庭）被 AccessControl 拒绝，记录原因但不影响其他规则；
  * - 所有评估、裁决、下发步骤写入 {@link RuleTrace}，作为可解释追踪链路。
  */
@@ -137,24 +138,6 @@ public class RuleEngine {
                     if (!ruleTouchesDevice(rule, event.device().deviceId())) {
                         continue;
                     }
-                    // 环检测优先于去重：规则已在当前触发路径上即为闭环，必须立即识别
-                    if (event.path().contains(rule.ruleId())) {
-                        List<String> cyclePath = new ArrayList<>(event.path());
-                        cyclePath.add(rule.ruleId());
-                        trace.markCycle(cyclePath);
-                        trace.step("检测到规则环: " + cyclePath + "，终止传播");
-                        log.warn("[规则传播-成环] event={} 环={}", eventId, cyclePath);
-                        lastCycle.put(event.device().householdId(),
-                                List.copyOf(cyclePath));
-                        return new PropagationResult(eventId, List.copyOf(firedRules),
-                                List.copyOf(dispatched), Map.copyOf(suppressed),
-                                List.copyOf(cyclePath), trace);
-                    }
-                    // 一次传播去重：已在本传播任意层触发过且不在当前路径上的规则不再执行
-                    if (globallyFired.contains(rule.ruleId())) {
-                        trace.step("规则 " + rule.ruleId() + " 本次传播已触发过，去重跳过");
-                        continue;
-                    }
                     boolean satisfied;
                     try {
                         satisfied = rule.condition().evaluate(ctx);
@@ -168,9 +151,32 @@ public class RuleEngine {
                             + event.device().deviceId() + " 条件["
                             + rule.condition().describe() + "]=" + satisfied
                             + (satisfied ? " => 命中" : " => 不满足，不触发"));
-                    if (satisfied) {
-                        matched.put(rule, event);
+                    if (!satisfied) {
+                        // 回指同一设备/同一规则但条件已不再成立：不是环，链路继续推完
+                        continue;
                     }
+                    // 条件确实成立且规则已在当前触发路径上 => 会真的再次触发，才是真实成环。
+                    // 环检测优先于去重与再次执行，首尾相接处立即终止整条传播。
+                    if (event.path().contains(rule.ruleId())) {
+                        List<String> cyclePath = new ArrayList<>(event.path());
+                        cyclePath.add(rule.ruleId());
+                        trace.markCycle(cyclePath);
+                        trace.step("检测到规则环（条件仍成立、将真实再触发）: "
+                                + cyclePath + "，终止传播");
+                        log.warn("[规则传播-成环] event={} 环={}", eventId, cyclePath);
+                        lastCycle.put(event.device().householdId(),
+                                List.copyOf(cyclePath));
+                        return new PropagationResult(eventId, List.copyOf(firedRules),
+                                List.copyOf(dispatched), Map.copyOf(suppressed),
+                                List.copyOf(cyclePath), trace);
+                    }
+                    // 一次传播去重：已在本传播其他路径触发过、条件虽成立但不在当前
+                    // 回指路径上的规则不再执行（同一状态变化同一规则不重复执行）
+                    if (globallyFired.contains(rule.ruleId())) {
+                        trace.step("规则 " + rule.ruleId() + " 本次传播已触发过，去重跳过");
+                        continue;
+                    }
+                    matched.put(rule, event);
                 }
             }
 

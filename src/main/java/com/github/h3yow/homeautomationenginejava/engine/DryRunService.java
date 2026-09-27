@@ -34,8 +34,9 @@ import java.util.TreeMap;
  *
  * 在本地模拟世界中按“与真实执行同一套语义”推演一组状态变化片段：
  * - 片段收敛语义镜像 {@link StateConvergence}（未知能力/缺字段/乱序重复/离线不覆盖属性）；
- * - 规则评估、去重、成环检测镜像 {@link RuleEngine}（同一次状态变化同一规则不重复触发，
- *   只有首尾相接的真实触发链判定成环并终止该次传播，长链路继续推完）；
+ * - 规则评估、去重、成环检测镜像 {@link RuleEngine}（同一次状态变化同一规则不重复触发；
+ *   先评估条件，只有条件仍成立、会真的再次触发的回指规则才判定成环并终止该次传播，
+ *   条件已不再成立的回指规则不算环、长链路继续推完）；
  * - 冲突裁决复用 {@link ConflictResolver#resolvePure}（确定且不依赖处理顺序）；
  * - 动作校验复用 {@link CommandService#validateAgainstModel} 与
  *   {@link AccessControl#requireRuleActionScope}（能力/版本/参数/越权结论与真实一致）；
@@ -256,23 +257,6 @@ public class DryRunService {
                     if (!ruleTouchesDevice(rule, event.device().deviceId())) {
                         continue;
                     }
-                    // 环检测优先于去重：规则已在当前触发路径上即为闭环
-                    if (event.path().contains(rule.ruleId())) {
-                        List<String> cyclePath = new ArrayList<>(event.path());
-                        cyclePath.add(rule.ruleId());
-                        if (ctx.cyclePath == null) {
-                            ctx.cyclePath = cyclePath;
-                        }
-                        ctx.step("CYCLE", "检测到规则环: " + cyclePath
-                                + "，终止本次传播（真实成环，首尾相接）");
-                        log.warn("[试运行-成环] 环={}", cyclePath);
-                        return;
-                    }
-                    if (globallyFired.contains(rule.ruleId())) {
-                        ctx.step("EVAL", "规则 " + rule.ruleId()
-                                + " 本次传播已触发过，去重跳过");
-                        continue;
-                    }
                     boolean satisfied;
                     try {
                         satisfied = rule.condition().evaluate(triggerCtx);
@@ -286,9 +270,29 @@ public class DryRunService {
                             + event.device().deviceId() + " 条件["
                             + rule.condition().describe() + "]=" + satisfied
                             + (satisfied ? " => 命中" : " => 不满足，不触发"));
-                    if (satisfied) {
-                        matched.put(rule, event);
+                    if (!satisfied) {
+                        // 回指同一设备/同一规则但条件已不再成立：不是环，链路继续推完
+                        continue;
                     }
+                    // 条件确实成立且规则已在当前触发路径上 => 会真的再次触发，才是真实成环。
+                    // 环检测优先于去重与再次执行，首尾相接处立即终止本次传播。
+                    if (event.path().contains(rule.ruleId())) {
+                        List<String> cyclePath = new ArrayList<>(event.path());
+                        cyclePath.add(rule.ruleId());
+                        if (ctx.cyclePath == null) {
+                            ctx.cyclePath = cyclePath;
+                        }
+                        ctx.step("CYCLE", "检测到规则环（条件仍成立、将真实再触发）: "
+                                + cyclePath + "，终止本次传播（真实成环，首尾相接）");
+                        log.warn("[试运行-成环] 环={}", cyclePath);
+                        return;
+                    }
+                    if (globallyFired.contains(rule.ruleId())) {
+                        ctx.step("EVAL", "规则 " + rule.ruleId()
+                                + " 本次传播已触发过，去重跳过");
+                        continue;
+                    }
+                    matched.put(rule, event);
                 }
             }
 
